@@ -102,6 +102,7 @@ python3 push_to.py --ra 5.588 --dec -5.39      # real readers
 python3 push_to.py --ra 5.588 --dec -5.39 --simulate   # push-to by hand with arrow keys
 python3 push_to.py --ra 5.588 --dec -5.39 --simulate --auto   # auto-converge demo
 python3 push_to.py --ra 5.588 --dec -5.39 --once       # single frame
+python3 push_to.py --ra 5.588 --dec -5.39 --quiet      # tones only, no display (INDI helper)
 ```
 
 ### Simulation with arrow keys
@@ -143,6 +144,61 @@ Behaviour:
   60 s inside it.
 - Terminal display: target RA/DEC, real HA/DEC, real RA, LST, angular
   error, current tone, status. Rewrites in place on terminals.
+- `--quiet` skips the display entirely and keeps the tones: this is the
+  mode launched by the INDI driver, so the beeps come out of the Pi's
+  audio while the coordinates are shown by the INDI client instead.
+
+## INDI telescope driver (Pi 5)
+
+`indi_push_to/indi_push_to_circle.cpp` is a driver-only telescope
+(no motor control). It reads the two ESP32-CAM circle readers over HTTP
+every polling cycle, computes LST from the site location and UTC, and
+reports RA/DEC like a normal telescope, so SkyChart, Stellarium, KStars
+or Ekos simply show where the telescope is pointing in real time.
+
+Selecting a target / GOTO in the client launches the push-to helper
+
+```
+push_to.py --ra <ra hours> --dec <dec degrees> --quiet
+```
+
+so the operator hand-slews while the tone rises and the double beep
+marks the tolerance box. The helper exits itself; the driver's slew
+state (SLEWING -> TRACKING when within 0.2 deg -> IDLE on helper exit)
+follows along. The driver runs on any INDI build; it compiles against
+both libindi 1.9.9 (Debian bookworm) and 2.x (trixie).
+
+Build on the Pi 5:
+
+```
+sudo apt install build-essential cmake libindi-dev
+cd indi_push_to
+cmake -B build . && cmake --build build
+sudo cmake --install build        # installs /usr/local/bin/indi_push_to_circle
+sudo cp ../push_to.py /usr/local/bin/push_to.py && sudo chmod +x /usr/local/bin/push_to.py
+```
+
+Run it:
+
+```
+indiserver -v indi_push_to_circle &
+```
+
+then connect from SkyChart/Stellarium/KStars (INDI driver
+`Push-To Circle Reader`). Driver properties:
+
+- `PUSH_TO_CONFIG` (Options tab): `HA_URL` / `DEC_URL` (the two
+  `http://<cam>/pos` endpoints) and `HELPER` (path of push_to.py).
+- `TELESCOPE_LOCATION`: site latitude / longitude (east positive) /
+  elevation, used for the LST computation. Saved to the driver config
+  on change.
+- Sync (Framing tab): stores an offset applied to the reported
+  coordinates only, for small circle misalignments - the raw circle
+  readings stay untouched.
+- Goto: starts the helper; Abort/Disconnect kill it.
+
+Nothing moves at any point; the driver is strictly a coordinate reader
+plus the audio push-to guide.
 
 ## Next steps
 
