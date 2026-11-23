@@ -325,7 +325,7 @@ def draw_frame(lines):
 # ----------------------------------------------------------------------------
 
 
-def run(target_ra_hours, target_dec_deg, simulate, once, auto=False, keys=None):
+def run(target_ra_hours, target_dec_deg, simulate, once, auto=False, keys=None, quiet=False):
     read = SimulatedScope(target_ra_hours, target_dec_deg, auto) if simulate else read_scope
     tolerance_deg = math.hypot(
         HA_TOLERANCE_MIN / 60.0 * math.cos(math.radians(target_dec_deg)),
@@ -375,7 +375,8 @@ def run(target_ra_hours, target_dec_deg, simulate, once, auto=False, keys=None):
             time.sleep(0.08)
             play_tone(TONE_MAX_HZ, 0.12)
         elif in_tol and now - in_tol_since > TIMEOUT_SECONDS:
-            draw_frame(["telescope push-to console", "target reached, done"])
+            if not quiet:
+                draw_frame(["telescope push-to console", "target reached, done"])
             return
         elif not in_tol:
             in_tol_since = None
@@ -411,6 +412,9 @@ def run(target_ra_hours, target_dec_deg, simulate, once, auto=False, keys=None):
             for line in lines:
                 print(line)
             return
+        if quiet:
+            time.sleep(max(0.0, BEEP_PERIOD_SECONDS - BEEP_SECONDS))
+            continue
         if first_frame and ansi:
             sys.stdout.write("\x1b[2J\x1b[?25l")
             first_frame = False
@@ -431,10 +435,15 @@ def main():
         help="with --simulate: drift onto the target automatically",
     )
     ap.add_argument("--once", action="store_true", help="print one frame and exit")
+    ap.add_argument(
+        "--quiet",
+        action="store_true",
+        help="tones only, no terminal display (for INDI driver use)",
+    )
     args = ap.parse_args()
-    keys = KeyboardArrows() if args.simulate and not args.once else None
+    keys = KeyboardArrows() if args.simulate and not args.once and not args.quiet else None
     try:
-        run(args.ra, args.dec, args.simulate, args.once, args.auto, keys)
+        run(args.ra, args.dec, args.simulate, args.once, args.auto, keys, args.quiet)
     except KeyboardInterrupt:
         pass
     finally:
