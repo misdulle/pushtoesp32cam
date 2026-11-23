@@ -181,36 +181,41 @@ class KeyboardArrows:
 
 
 class SimulatedScope:
-    """Fake circle readers.
+    """Fake circle readers with sidereal tracking on.
 
-    Keyboard mode: arrows move the real position by KEY_STEP_RA_H and
-    KEY_STEP_DEC_DEG per arrow received. Auto mode (--auto): drifts
-    onto the target like a perfect pusher, for a hands-free demo.
+    The scope holds a sky position (pointing RA). HA is recomputed each
+    frame as LST - pointing RA, so between keystrokes the RA stays fixed
+    while the HA circle drifts at the sidereal rate - like a real scope
+    with the drive running. Keyboard mode: arrows step the pointing by
+    KEY_STEP_RA_H and KEY_STEP_DEC_DEG per arrow received. Auto mode
+    (--auto): drifts onto the target like a perfect pusher, for a
+    hands-free demo.
     """
 
     def __init__(self, t_ra, t_dec, auto=False):
         self.t_ra = t_ra
         self.t_dec = t_dec
         self.auto = auto
-        self.ha = None
+        self.point_ra = None
         self.dec = t_dec - 8.0
 
     def __call__(self, lst, motion=(0.0, 0.0)):
-        if self.ha is None:
-            self.ha = ((lst - self.t_ra) + 3.0) % 24.0
+        if self.point_ra is None:
+            self.point_ra = (self.t_ra - 3.0) % 24.0
         if self.auto:
-            error_ha = ((lst - self.t_ra - self.ha + 12.0) % 24.0) - 12.0
+            error_ra = ((self.t_ra - self.point_ra + 12.0) % 24.0) - 12.0
             error_dec = self.t_dec - self.dec
             rate = 0.08
-            self.ha = (self.ha + error_ha * rate) % 24.0
+            self.point_ra = (self.point_ra + error_ra * rate) % 24.0
             self.dec += error_dec * rate
         else:
             d_ra, d_dec = motion
-            self.ha = (self.ha - d_ra) % 24.0
+            self.point_ra = (self.point_ra + d_ra) % 24.0
             self.dec = max(-90.0, min(90.0, self.dec + d_dec))
+        ha = (lst - self.point_ra) % 24.0
         jitter_ha = 0.15 * HA_CODE_MINUTES / 60.0
         jitter_dec = 0.15 * DEC_CODE_DEG
-        rha = (self.ha + ((time.time() * 7) % 1 - 0.5) * jitter_ha) % 24.0
+        rha = (ha + ((time.time() * 7) % 1 - 0.5) * jitter_ha) % 24.0
         rdec = self.dec + ((time.time() * 11) % 1 - 0.5) * jitter_dec
         return rha, rdec
 

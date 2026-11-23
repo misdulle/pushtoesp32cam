@@ -124,6 +124,12 @@ simulator moves the same quantum the push-to tone propagates. The
 simulated reading carries a small jitter (15% of a cell) so the display
 behaves like a real readout.
 
+The simulated telescope has sidereal tracking on, like the real mount
+when driven: the pointing RA is held between keystrokes while the HA
+circle drifts at the sidereal rate (~15 arcsec/s, one 5 min code cell
+per ~5 minutes), so the real HA readout creeps forward the way it does
+on the actual telescope with the clock drive running.
+
 Behaviour:
 
 - LST each frame from UTC and east longitude
