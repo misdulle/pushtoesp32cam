@@ -99,9 +99,29 @@ Run:
 
 ```
 python3 push_to.py --ra 5.588 --dec -5.39      # real readers
-python3 push_to.py --ra 5.588 --dec -5.39 --simulate   # demo, no hardware
+python3 push_to.py --ra 5.588 --dec -5.39 --simulate   # push-to by hand with arrow keys
+python3 push_to.py --ra 5.588 --dec -5.39 --simulate --auto   # auto-converge demo
 python3 push_to.py --ra 5.588 --dec -5.39 --once       # single frame
 ```
+
+### Simulation with arrow keys
+
+`--simulate` fakes the circle readers and lets the operator slew the
+simulated telescope with the arrow keys, which is the real operating
+experience: move onto the target until the tone climbs and the double
+beep fires.
+
+- Right arrow: RA +5 min of time (real HA -5 min)
+- Left arrow: RA -5 min of time (real HA +5 min)
+- Up arrow: DEC +0.5 deg ; Down arrow: DEC -0.5 deg
+- Holding a key auto-repeats; steps accumulate while buffered
+- Ctrl-C quits (works in raw mode); terminals only (pipe-friendly
+  degradation: keys are ignored, `--auto` gives the same screen)
+
+The step sizes match one code cell on each circle, so the keyboard
+simulator moves the same quantum the push-to tone propagates. The
+simulated reading carries a small jitter (15% of a cell) so the display
+behaves like a real readout.
 
 Behaviour:
 
