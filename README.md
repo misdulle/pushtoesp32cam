@@ -148,6 +148,35 @@ Behaviour:
   mode launched by the INDI driver, so the beeps come out of the Pi's
   audio while the coordinates are shown by the INDI client instead.
 
+## Testing without cameras
+
+`devtools/fake_cams.py` serves the same HTTP interface as the real
+ESP32-CAM readers on two local ports, so the whole host chain runs with
+no hardware:
+
+```
+python3 devtools/fake_cams.py --ha 6.12 --dec 23.4      # fixed readings
+python3 devtools/fake_cams.py --drift --ra 5.588 --dec-target -5.39
+python3 devtools/fake_cams.py --fail                    # band unreadable
+python3 devtools/fake_cams.py --jitter 0.005            # noisy readings
+```
+
+It answers `GET /pos` with `AXIS=/CODE=/VALUE=` lines exactly like the
+sketch (wrong code 503 + `ERROR=` with `--fail`), plus `/raw`. `CODE=`
+holds the same mapping the decoders use (HA: minutes / 5, DEC:
+(deg + 90) / 0.5), so client and server stay consistent.
+
+`--drift` mimics a driven scope: it holds a pointing RA (HA comes from
+LST at `--longitude`) and converges onto `--ra` / `--dec-target`, so a
+GOTO launched from KStars/Ekos against the INDI driver ends in the
+double beep within a couple of minutes, hands-free.
+
+To exercise `push_to.py`'s real HTTP path, point
+`ESP32_HA_URL` / `ESP32_DEC_URL` in the edit block at
+`http://127.0.0.1:8801/pos` and `http://127.0.0.1:8802/pos`. For the
+INDI driver, set `HA_URL` / `DEC_URL` in `PUSH_TO_CONFIG` to the same
+addresses.
+
 ## INDI telescope driver (Pi 5)
 
 `indi_push_to/indi_push_to_circle.cpp` is a driver-only telescope
