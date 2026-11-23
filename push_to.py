@@ -9,7 +9,8 @@ target / real coordinates and LST on a text-only terminal screen.
 
 Usage:
     python3 push_to.py                      # talk to the ESP32-CAMs
-    python3 push_to.py --simulate           # offline convergence demo
+    python3 push_to.py --simulate           # arrow keys push RA/DEC by hand
+    python3 push_to.py --simulate --auto    # offline auto-convergence demo
     python3 push_to.py --once               # print one display frame, exit
 """
 
@@ -24,6 +25,13 @@ import tempfile
 import time
 import urllib.request
 import wave
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import select
+    import termios
+    import tty
 
 # ----------------------------------------------------------------------------
 # Site and system configuration (edit to match the installation)
@@ -41,6 +49,9 @@ DEC_TOLERANCE_ARCMIN = 30.0
 
 HA_CODE_MINUTES = 5.0      # one HA code cell spans 5 min of hour angle
 DEC_CODE_DEG = 0.5         # one DEC code cell spans 30 arcmin
+
+KEY_STEP_RA_H = HA_CODE_MINUTES / 60.0      # RA step per arrow repeat
+KEY_STEP_DEC_DEG = DEC_CODE_DEG             # DEC step per arrow repeat
 
 TONE_MIN_HZ = 400.0        # frequency when far away (or diverging)
 TONE_MAX_HZ = 2000.0       # frequency when exactly on target
@@ -100,25 +111,105 @@ def read_scope():
     return rha, rdec
 
 
-class SimulatedScope:
-    """Fake circle readers: starts away from the target and drifts onto it."""
+class KeyboardArrows:
+    """Non-blocking arrow-key reader; returns per-frame motion requests.
 
-    def __init__(self, t_ra, t_dec):
+    read_motion() drains stdin and returns (d_ra_hours, d_dec_deg):
+    right arrow -> RA +, left -> RA -, up -> DEC +, down -> DEC -.
+    Ctrl-C always raises KeyboardInterrupt, even in cbreak mode.
+    """
+
+    def __init__(self):
+        self._old = None
+        self._win = os.name == "nt"
+        if self._win:
+            return
+        self._fd = sys.stdin.fileno()
+        if not os.isatty(self._fd):
+            self._win = None
+            return
+        self._old = termios.tcgetattr(self._fd)
+        tty.setcbreak(self._fd)
+
+    def _readchar(self, timeout):
+        if self._win in (True, None):
+            if self._win and msvcrt.kbhit():
+                return msvcrt.getwch()
+            return ""
+        if select.select([self._fd], [], [], timeout)[0]:
+            return os.read(self._fd, 1).decode("utf-8", "replace")
+        return ""
+
+    def read_motion(self):
+        if self._win is None:
+            return 0.0, 0.0
+        d_ra = 0.0
+        d_dec = 0.0
+        while True:
+            ch = self._readchar(0.0)
+            if not ch:
+                break
+            if ch in ("\x00", "\xe0") and self._win:
+                ext = self._readchar(0.0)
+                if ext in ("K", "M"):
+                    d_ra -= KEY_STEP_RA_H if ext == "K" else -KEY_STEP_RA_H
+                elif ext in ("H", "P"):
+                    d_dec += KEY_STEP_DEC_DEG if ext == "H" else -KEY_STEP_DEC_DEG
+                continue
+            if ch == "\x03":
+                raise KeyboardInterrupt
+            if ch != "\x1b":
+                continue
+            c1 = self._readchar(0.05)
+            if c1 != "[":
+                continue
+            c2 = self._readchar(0.05)
+            if c2 == "C":
+                d_ra += KEY_STEP_RA_H
+            elif c2 == "D":
+                d_ra -= KEY_STEP_RA_H
+            elif c2 == "A":
+                d_dec += KEY_STEP_DEC_DEG
+            elif c2 == "B":
+                d_dec -= KEY_STEP_DEC_DEG
+        return d_ra, d_dec
+
+    def close(self):
+        if self._old is not None:
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
+            self._old = None
+
+
+class SimulatedScope:
+    """Fake circle readers.
+
+    Keyboard mode: arrows move the real position by KEY_STEP_RA_H and
+    KEY_STEP_DEC_DEG per arrow received. Auto mode (--auto): drifts
+    onto the target like a perfect pusher, for a hands-free demo.
+    """
+
+    def __init__(self, t_ra, t_dec, auto=False):
         self.t_ra = t_ra
         self.t_dec = t_dec
+        self.auto = auto
         self.ha = None
         self.dec = t_dec - 8.0
 
-    def __call__(self, lst):
+    def __call__(self, lst, motion=(0.0, 0.0)):
         if self.ha is None:
             self.ha = ((lst - self.t_ra) + 3.0) % 24.0
-        error_ha = ((lst - self.t_ra - self.ha + 12.0) % 24.0) - 12.0
-        error_dec = self.t_dec - self.dec
-        rate = 0.08
-        self.ha = (self.ha + error_ha * rate) % 24.0
-        self.dec += error_dec * rate
-        jitter_ha = 0.5 * HA_CODE_MINUTES / 60.0
-        jitter_dec = 0.5 * DEC_CODE_DEG
+        if self.auto:
+            error_ha = ((lst - self.t_ra - self.ha + 12.0) % 24.0) - 12.0
+            error_dec = self.t_dec - self.dec
+            rate = 0.08
+            self.ha = (self.ha + error_ha * rate) % 24.0
+            self.dec += error_dec * rate
+        else:
+            d_ra, d_dec = motion
+            self.ha = (self.ha - d_ra) % 24.0
+            self.dec = max(-90.0, min(90.0, self.dec + d_dec))
+        jitter_ha = 0.15 * HA_CODE_MINUTES / 60.0
+        jitter_dec = 0.15 * DEC_CODE_DEG
         rha = (self.ha + ((time.time() * 7) % 1 - 0.5) * jitter_ha) % 24.0
         rdec = self.dec + ((time.time() * 11) % 1 - 0.5) * jitter_dec
         return rha, rdec
@@ -234,8 +325,8 @@ def draw_frame(lines):
 # ----------------------------------------------------------------------------
 
 
-def run(target_ra_hours, target_dec_deg, simulate, once):
-    read = SimulatedScope(target_ra_hours, target_dec_deg) if simulate else read_scope
+def run(target_ra_hours, target_dec_deg, simulate, once, auto=False, keys=None):
+    read = SimulatedScope(target_ra_hours, target_dec_deg, auto) if simulate else read_scope
     tolerance_deg = math.hypot(
         HA_TOLERANCE_MIN / 60.0 * math.cos(math.radians(target_dec_deg)),
         DEC_TOLERANCE_ARCMIN / 60.0,
@@ -247,7 +338,7 @@ def run(target_ra_hours, target_dec_deg, simulate, once):
         lst = lst_hours(time.time(), LONGITUDE_EAST_DEG)
         try:
             if simulate:
-                rha, rdec = read(lst)
+                rha, rdec = read(lst, keys.read_motion() if keys else (0.0, 0.0))
             else:
                 rha, rdec = read()
         except Exception as exc:
@@ -310,6 +401,12 @@ def run(target_ra_hours, target_dec_deg, simulate, once):
                 else ("converging" if closing else "diverging - slew toward target")
             ),
         ]
+        if simulate and not auto:
+            lines.insert(
+                2,
+                "arrows: <-/-> RA %s, up/down DEC %s   Ctrl-C quit"
+                % (hm(KEY_STEP_RA_H).strip(), dms(KEY_STEP_DEC_DEG)),
+            )
         if once:
             for line in lines:
                 print(line)
@@ -325,14 +422,24 @@ def main():
     ap = argparse.ArgumentParser(description="Push-to console for the telescope")
     ap.add_argument("--ra", type=float, required=True, help="target RA in hours")
     ap.add_argument("--dec", type=float, required=True, help="target DEC in degrees")
-    ap.add_argument("--simulate", action="store_true", help="fake the circle readers")
+    ap.add_argument(
+        "--simulate", action="store_true", help="fake the circle readers"
+    )
+    ap.add_argument(
+        "--auto",
+        action="store_true",
+        help="with --simulate: drift onto the target automatically",
+    )
     ap.add_argument("--once", action="store_true", help="print one frame and exit")
     args = ap.parse_args()
+    keys = KeyboardArrows() if args.simulate and not args.once else None
     try:
-        run(args.ra, args.dec, args.simulate, args.once)
+        run(args.ra, args.dec, args.simulate, args.once, args.auto, keys)
     except KeyboardInterrupt:
         pass
     finally:
+        if keys:
+            keys.close()
         if ansi:
             sys.stdout.write("\x1b[?25h\x1b[0m")
             sys.stdout.flush()
