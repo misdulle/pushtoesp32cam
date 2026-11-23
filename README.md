@@ -177,6 +177,26 @@ To exercise `push_to.py`'s real HTTP path, point
 INDI driver, set `HA_URL` / `DEC_URL` in `PUSH_TO_CONFIG` to the same
 addresses.
 
+### Bridge from a real INDI mount
+
+`devtools/mount_cams.py` serves the same reader interface but takes its
+sky position from a real mount, by snooping an INDI telescope driver
+(e.g. EQMod) on an indiserver - move that mount by hand and the whole
+push-to chain runs against genuine sky motion:
+
+```
+python3 devtools/mount_cams.py                 # snoops 127.0.0.1:7624
+python3 devtools/mount_cams.py --host 192.168.x.y --device "EQMod Mount"
+```
+
+It reads `EQUATORIAL_EOD_COORD` (epoch of now), computes
+HA = LST - RA at `--longitude` and serves `/pos` + `/raw` on the same
+ports as fake_cams; clients are configured identically. With no mount
+data for 10 s (`--stale`) it answers 503 like an unreadable band, and
+it reconnects automatically if the indiserver or the mount connection
+drops. It speaks the raw INDI XML protocol (stdlib only) and never
+sends anything to the mount but its subscription.
+
 ## INDI telescope driver (Pi 5)
 
 `indi_push_to/indi_push_to_circle.cpp` is a driver-only telescope
