@@ -81,6 +81,16 @@
 const char* WIFI_SSID = "your-ssid";
 const char* WIFI_PASS = "your-password";
 
+/*
+  Fixed address. Leave STATIC_IP empty for DHCP; set all three to pin
+  the camera to a known address - the INDI driver and push_to.py
+  defaults assume the HA reader at 192.168.4.1 and the DEC reader at
+  192.168.4.2. All three must be set for static mode to engage.
+*/
+const char* STATIC_IP   = "";   // e.g. "192.168.4.1"
+const char* STATIC_GW   = "";   // e.g. "192.168.4.1"
+const char* STATIC_SN   = "";   // e.g. "255.255.255.0"
+
 WebServer server(80);
 camera_fb_t* fb = NULL;
 
@@ -303,6 +313,20 @@ void setup() {
   s->set_special_effect(s, 0);
 
   WiFi.mode(WIFI_STA);
+  if (STATIC_IP[0] && STATIC_GW[0] && STATIC_SN[0])
+  {
+    IPAddress ip, gw, sn;
+    if (!ip.fromString(STATIC_IP) || !gw.fromString(STATIC_GW) ||
+            !sn.fromString(STATIC_SN))
+    {
+      Serial.println("bad STATIC_IP/STATIC_GW/STATIC_SN, falling back to DHCP");
+    }
+    else
+    {
+      WiFi.config(ip, gw, sn);
+      Serial.printf("static config: %s gw %s\n", STATIC_IP, STATIC_GW);
+    }
+  }
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("connecting");
   while (WiFi.status() != WL_CONNECTED) {
