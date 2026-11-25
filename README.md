@@ -78,7 +78,12 @@ Endpoints:
 - `GET /raw` -> just the decoded index, for calibration.
 - `GET /debug` -> diagnostics: camera init result/error code, init
   tries, detected sensor (expect 0x3660 = OV3660, 0x2640 = OV2640),
-  PSRAM size/free, free heap, grabbed frame size, WiFi IP/RSSI.
+  PSRAM size/free, free heap, grabbed frame size, WiFi IP/RSSI, and
+  min/max/mean levels over the calibrated band rows (exposure
+  check: dark cells well under ~100, white well over ~180).
+- `GET /bmp` -> the current frame as a grayscale BMP, viewable
+  directly in a browser - point the camera at the band, focus, then
+  verify the band sits inside the calibrated row range.
 - `GET /init` -> retry camera init without rebooting (the sketch never
   restarts on camera failure: WiFi and the diagnostics endpoints stay
   up so you can iterate over HTTP alone).

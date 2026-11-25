@@ -385,6 +385,29 @@ void handleDebug() {
     if (d) {
       msg += "frame=" + String(d->width) + "x" + String(d->height) +
              " len=" + String(d->len) + "\n";
+      /* Level statistics over the calibrated band rows. */
+      int bw = d->width;
+      int rs = (int)(BAND_ROW_START * d->height / 480.0f + 0.5f);
+      int re = (int)(BAND_ROW_END * d->height / 480.0f + 0.5f);
+      if (rs < 0) rs = 0;
+      if (re > (int)d->height) re = d->height;
+      if (re > rs && d->len >= (size_t)(re * bw)) {
+        int brow = re - rs;
+        unsigned long mn = 255, mx = 0, sum = 0, cnt = 0;
+        for (int y = rs; y < re; y++) {
+          const uint8_t* line = d->buf + (size_t)y * bw;
+          for (int x = 0; x < bw; x++) {
+            unsigned v = line[x];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+            sum += v;
+            cnt++;
+          }
+        }
+        msg += "band_rows=" + String(rs) + ".." + String(re) + "\n";
+        msg += "band_min=" + String(mn) + " band_max=" + String(mx) +
+               " band_mean=" + String(sum / cnt) + "\n";
+      }
       esp_camera_fb_return(d);
     } else {
       msg += "frame=GRAB FAILED\n";
@@ -401,6 +424,76 @@ void handleReinit() {
     server.send(503, "text/plain", "ERROR=camera init failed err=0x" +
                 String((unsigned)err, HEX) + "\n");
   }
+}
+
+/* Current frame as an 8-bit grayscale BMP, viewable in a browser. */
+void handleBmp() {
+  if (!camReady) {
+    server.send(503, "text/plain", "ERROR=camera not ready err=0x" +
+                String((unsigned)camErr, HEX) + "\n");
+    return;
+  }
+  camera_fb_t* d = esp_camera_fb_get();
+  if (!d) {
+    server.send(503, "text/plain", "ERROR=grab failed\n");
+    return;
+  }
+  int w = d->width;
+  int h = d->height;
+  uint32_t rowSize = (w + 3) & ~3u;
+  uint32_t dataOff = 54u + 1024u;
+  uint32_t fileSize = dataOff + rowSize * (uint32_t)h;
+
+  uint8_t hdr[54];
+  uint32_t u32 = fileSize;
+  int32_t i32;
+  hdr[0] = 'B';
+  hdr[1] = 'M';
+  memcpy(hdr + 2, &u32, 4);
+  u32 = 0;
+  memcpy(hdr + 6, &u32, 4);
+  u32 = dataOff;
+  memcpy(hdr + 10, &u32, 4);
+  u32 = 40;
+  memcpy(hdr + 14, &u32, 4);
+  i32 = w;
+  memcpy(hdr + 18, &i32, 4);
+  i32 = -h;  /* negative height = top-down rows */
+  memcpy(hdr + 22, &i32, 4);
+  uint16_t u16 = 1;
+  memcpy(hdr + 26, &u16, 2);
+  u16 = 8;
+  memcpy(hdr + 28, &u16, 2);
+  u32 = 0;
+  memcpy(hdr + 30, &u32, 4);
+  u32 = rowSize * (uint32_t)h;
+  memcpy(hdr + 34, &u32, 4);
+  u32 = 0;
+  memcpy(hdr + 38, &u32, 4);
+  memcpy(hdr + 42, &u32, 4);
+  u32 = 256;
+  memcpy(hdr + 46, &u32, 4);
+  memcpy(hdr + 50, &u32, 4);
+
+  static uint8_t pal[1024];
+  for (int i = 0; i < 256; i++) {
+    pal[i * 4 + 0] = (uint8_t)i;
+    pal[i * 4 + 1] = (uint8_t)i;
+    pal[i * 4 + 2] = (uint8_t)i;
+    pal[i * 4 + 3] = 0;
+  }
+
+  static uint8_t rowBuf[1600];
+  server.setContentLength(fileSize);
+  server.send(200, "image/bmp", "");
+  server.sendContent((const char*)hdr, sizeof(hdr));
+  server.sendContent((const char*)pal, sizeof(pal));
+  for (int y = 0; y < h; y++) {
+    memcpy(rowBuf, d->buf + (size_t)y * w, w);
+    if (rowSize > (uint32_t)w) memset(rowBuf + w, 0, rowSize - w);
+    server.sendContent((const char*)rowBuf, rowSize);
+  }
+  esp_camera_fb_return(d);
 }
 
 void setup() {
@@ -432,6 +525,7 @@ void setup() {
   server.on("/pos", HTTP_GET, handlePos);
   server.on("/raw", HTTP_GET, handleRaw);
   server.on("/debug", HTTP_GET, handleDebug);
+  server.on("/bmp", HTTP_GET, handleBmp);
   server.on("/init", HTTP_GET, handleReinit);
   server.begin();
   Serial.println("web server up, initializing camera");
