@@ -94,6 +94,18 @@ const char* STATIC_SN   = "";   // e.g. "255.255.255.0"
 WebServer server(80);
 camera_fb_t* fb = NULL;
 
+bool camReady = false;
+esp_err_t camErr = ESP_FAIL;
+unsigned long camInitCount = 0;
+
+/*
+  Bench heartbeat: blinks the on-board (flash) LED without blocking.
+  Set to 0 to disable (recommended for the dome: the LED is bright and
+  points at the circle).
+*/
+#define HEARTBEAT_LED_MS 0
+#define HEARTBEAT_LED_PIN 4
+
 float angleFromCode(int n) {
   if (CIRCLE_AXIS == AXIS_HA) {
     if (n < 0 || n >= 288) return NAN;
@@ -163,8 +175,11 @@ bool decodeCircle(int* code_out) {
   if (!fb) return false;
 
   int w = fb->width;
-  int rows = BAND_ROW_END - BAND_ROW_START;
-  if (fb->len < (size_t)(BAND_ROW_END * w)) {
+  int rStart = (int)(BAND_ROW_START * fb->height / 480.0f + 0.5f);
+  int rEnd = (int)(BAND_ROW_END * fb->height / 480.0f + 0.5f);
+  int rows = rEnd - rStart;
+  if (rStart < 0 || rows <= 0 || rEnd > (int)fb->height ||
+          fb->len < (size_t)(rEnd * w)) {
     esp_camera_fb_return(fb);
     return false;
   }
@@ -176,7 +191,7 @@ bool decodeCircle(int* code_out) {
 
   for (int x = 0; x < maxCols; x++) {
     unsigned long acc = 0;
-    const uint8_t* line = fb->buf + (size_t)BAND_ROW_START * w + x;
+    const uint8_t* line = fb->buf + (size_t)rStart * w + x;
     for (int y = 0; y < rows; y++) acc += line[(size_t)y * w];
     uint8_t v = (uint8_t)(acc / rows);
     prof[x] = v;
@@ -206,7 +221,14 @@ bool decodeCircle(int* code_out) {
 
   int markerW = 0;
   int markerStart = findWidestDarkRun(prof, maxCols, thr, &markerW);
-  if (markerStart < 0 || markerW < 11 * CAL_CELL_PX || markerW > 13 * CAL_CELL_PX) {
+  /*
+    Geometry is calibrated for VGA (CAL_CELL_PX at 640 px width);
+    scale if the camera fell back to a smaller frame (PSRAM-less
+    modules get QVGA so the grayscale framebuffer fits in DRAM).
+  */
+  int cellPx = (int)(CAL_CELL_PX * fb->width / 640.0f + 0.5f);
+  if (cellPx < 1) cellPx = 1;
+  if (markerStart < 0 || markerW < 11 * cellPx || markerW > 13 * cellPx) {
     esp_camera_fb_return(fb);
     return false;
   }
@@ -234,6 +256,11 @@ bool decodeCircle(int* code_out) {
 
 void handlePos() {
   int code = -1;
+  if (!camReady) {
+    server.send(503, "text/plain", "ERROR=camera not ready err=0x" +
+                String((unsigned)camErr, HEX) + "\n");
+    return;
+  }
   if (!decodeCircle(&code)) {
     server.send(503, "text/plain", "ERROR=decode failed\n");
     return;
@@ -255,6 +282,11 @@ void handlePos() {
 
 void handleRaw() {
   int code = -1;
+  if (!camReady) {
+    server.send(503, "text/plain", "ERROR=camera not ready err=0x" +
+                String((unsigned)camErr, HEX) + "\n");
+    return;
+  }
   if (!decodeCircle(&code)) {
     server.send(503, "text/plain", "ERROR=decode failed\n");
     return;
@@ -262,8 +294,14 @@ void handleRaw() {
   server.send(200, "text/plain", String(code) + "\n");
 }
 
-void setup() {
-  Serial.begin(115200);
+esp_err_t cameraInit() {
+  /*
+    Blob goes to PSRAM when the module has one (VGA grayscale needs a
+    ~300 kB contiguous buffer, too big for DRAM); PSRAM-less clones get
+    QVGA so the framebuffer fits in DRAM (decode scales geometry).
+  */
+  bool psram = psramFound();
+
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -285,32 +323,88 @@ void setup() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_GRAYSCALE;
-  config.frame_size = FRAMESIZE_VGA;
+  config.frame_size = psram ? FRAMESIZE_VGA : FRAMESIZE_QVGA;
   config.jpeg_quality = 12;
   config.fb_count = 1;
-  config.fb_location = CAMERA_FB_IN_DRAM;
+  config.fb_location = psram ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
   config.grab_mode = CAMERA_GRAB_LATEST;
 
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("camera init failed 0x%x\n", err);
-    delay(5000);
-    ESP.restart();
+  if (camReady) {
+    esp_camera_deinit();
+    camReady = false;
   }
+  esp_err_t err = esp_camera_init(&config);
+  camErr = err;
+  camReady = (err == ESP_OK);
+  camInitCount++;
+  if (camReady) {
+    sensor_t* s = esp_camera_sensor_get();
+    /*
+      Fixed exposure: AEC/AGC off, manual AEC value (OV3660/OV2640:
+      0..1200). Tune with /debug's frame grab: dark cells should land
+      well under ~100, white cells well over ~180 (see README).
+    */
+    s->set_exposure_ctrl(s, 0);
+    s->set_aec_value(s, 300);
+    s->set_gain_ctrl(s, 0);
+    s->set_agc_gain(s, 0);
+    s->set_awb_gain(s, 0);
+    s->set_wb_mode(s, 0);
+    s->set_special_effect(s, 0);
+  }
+  if (!camReady) {
+    Serial.printf("camera init failed 0x%x (try %lu)\n", err, camInitCount);
+  }
+  return err;
+}
 
-  sensor_t* s = esp_camera_sensor_get();
-  /*
-    Fixed exposure: AEC/AGC off, manual AEC value (OV2640: 0..1200).
-    Tune with /raw plus a photo of the band: dark cells should land
-    well under ~100, white cells well over ~180 (see README).
-  */
-  s->set_exposure_ctrl(s, 0);
-  s->set_aec_value(s, 300);
-  s->set_gain_ctrl(s, 0);
-  s->set_agc_gain(s, 0);
-  s->set_awb_gain(s, 0);
-  s->set_wb_mode(s, 0);
-  s->set_special_effect(s, 0);
+void handleDebug() {
+  String msg;
+  msg += "AXIS=";
+  msg += (CIRCLE_AXIS == AXIS_HA) ? "HA" : "DEC";
+  msg += "\n";
+  msg += "cam_ready=" + String(camReady ? "yes" : "no") + "\n";
+  msg += "cam_init_err=0x" + String((unsigned)camErr, HEX) + "\n";
+  msg += "cam_init_tries=" + String(camInitCount) + "\n";
+  msg += "psram_size=" + String(ESP.getPsramSize()) + "\n";
+  msg += "psram_free=" + String(ESP.getFreePsram()) + "\n";
+  msg += "heap_free=" + String(ESP.getFreeHeap()) + "\n";
+  msg += "ip=" + WiFi.localIP().toString() + "\n";
+  msg += "rssi=" + String(WiFi.RSSI()) + "\n";
+  if (camReady) {
+    sensor_t* s = esp_camera_sensor_get();
+    if (s) {
+      msg += "sensor=0x" + String(s->id.PID, HEX);
+      msg += " ver 0x" + String(s->id.VER, HEX);
+      msg += " mid 0x" + String(s->id.MIDL, HEX);
+      msg += String(s->id.PID) == String(14036) ? " (OV3660)" : "";
+      msg += String(s->id.PID) == String(9720) ? " (OV2640)" : "";
+      msg += "\n";
+    }
+    camera_fb_t* d = esp_camera_fb_get();
+    if (d) {
+      msg += "frame=" + String(d->width) + "x" + String(d->height) +
+             " len=" + String(d->len) + "\n";
+      esp_camera_fb_return(d);
+    } else {
+      msg += "frame=GRAB FAILED\n";
+    }
+  }
+  server.send(200, "text/plain", msg);
+}
+
+void handleReinit() {
+  esp_err_t err = cameraInit();
+  if (err == ESP_OK) {
+    server.send(200, "text/plain", "camera initialized\n");
+  } else {
+    server.send(503, "text/plain", "ERROR=camera init failed err=0x" +
+                String((unsigned)err, HEX) + "\n");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
 
   WiFi.mode(WIFI_STA);
   if (STATIC_IP[0] && STATIC_GW[0] && STATIC_SN[0])
@@ -337,9 +431,25 @@ void setup() {
 
   server.on("/pos", HTTP_GET, handlePos);
   server.on("/raw", HTTP_GET, handleRaw);
+  server.on("/debug", HTTP_GET, handleDebug);
+  server.on("/init", HTTP_GET, handleReinit);
   server.begin();
+  Serial.println("web server up, initializing camera");
+
+  cameraInit();
 }
 
 void loop() {
   server.handleClient();
+
+#if HEARTBEAT_LED_MS > 0
+  static unsigned long lastBlink = 0;
+  static bool ledOn = false;
+  unsigned long now = millis();
+  if (now - lastBlink >= HEARTBEAT_LED_MS) {
+    lastBlink = now;
+    ledOn = !ledOn;
+    digitalWrite(HEARTBEAT_LED_PIN, ledOn);
+  }
+#endif
 }

@@ -74,8 +74,20 @@ Endpoints:
 
 - `GET /pos` -> `AXIS=HA|DEC`, `CODE=<decoded index>`, `VALUE=<HA hours | DEC degrees>`
   (HTTP 503 with `ERROR=...` when the band is not read: cut marker,
-  out-of-range code, lost focus).
+  out-of-range code, lost focus, camera not ready).
 - `GET /raw` -> just the decoded index, for calibration.
+- `GET /debug` -> diagnostics: camera init result/error code, init
+  tries, detected sensor (expect 0x3660 = OV3660, 0x2640 = OV2640),
+  PSRAM size/free, free heap, grabbed frame size, WiFi IP/RSSI.
+- `GET /init` -> retry camera init without rebooting (the sketch never
+  restarts on camera failure: WiFi and the diagnostics endpoints stay
+  up so you can iterate over HTTP alone).
+
+WiFi comes up before the camera is initialized: unless the AP itself
+is down, `/debug` answers even with the camera fully failed. Camera
+buffer: uses PSRAM (VGA) when `psramFound()`, PSRAM-less modules fall
+back to QVGA + DRAM automatically and the decode scales the band
+geometry (VGA-calibrated `CAL_CELL_PX`/`BAND_ROW_*` apply to either).
 
 Calibration knobs at the top of the sketch:
 
