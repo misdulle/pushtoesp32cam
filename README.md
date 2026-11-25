@@ -52,12 +52,21 @@ rejected rather than mis-decoded.
 ## ESP32-CAM sketch
 
 `esp32cam_circle/esp32cam_circle.ino`, AI-Thinker ESP32-CAM, Arduino IDE
-or arduino-cli with the esp32 core.
+or arduino-cli with the esp32 core. Verified to compile with
+arduino-cli 1.6.0 against esp32 core 4.0.0 (defaults: 34% flash, 19%
+RAM):
+
+```
+arduino-cli core install esp32:esp32
+arduino-cli compile --fqbn esp32:esp32:esp32cam esp32cam_circle          # HA camera
+arduino-cli compile --fqbn esp32:esp32:esp32cam \
+    --build-property "compiler.cpp.extra_flags=-DCIRCLE_AXIS=1" \
+    esp32cam_circle                                                       # DEC camera
+```
 
 1. Set `WIFI_SSID` / `WIFI_PASS`.
-2. Set `CIRCLE_AXIS` to `AXIS_HA` for the hour-angle circle reader,
-   `AXIS_DEC` for the declination circle reader; flash the identical
-   sketch to both cameras.
+2. Pick the axis by editing `CIRCLE_AXIS`, or leave the file as-is and
+   use the `-DCIRCLE_AXIS=1` override above for the DEC camera.
 3. Point the camera squarely at the code band so the band crosses the
    frame horizontally.
 
@@ -76,9 +85,11 @@ Calibration knobs at the top of the sketch:
 - `BAND_ROW_START` / `BAND_ROW_END`: rows averaged into the profile;
   pick rows that cross the band and avoid the circle's graduation ticks
   for now (fine-reading work will use them deliberately).
-- Exposure/gain are fixed in `setup()`: with the studio lights the
-  levels must sit far apart (dark well under ~100, white well over
-  ~180); adjust `s->set_exposure()` until `+/-40` of noise still decodes.
+- Exposure/gain are fixed in `setup()`: AEC/AGC off, manual exposure
+  via `s->set_aec_value(s, 300)` (OV2640 range 0..1200). With the
+  studio lights the levels must sit far apart (dark well under ~100,
+  white well over ~180); raise/lower the value until +/-40 of noise
+  still decodes.
 
 The sketch intentionally serves fresh captures on request (no streaming).
 Averages over the band rows give roughly log2(rows) bits of noise
