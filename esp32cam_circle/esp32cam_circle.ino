@@ -484,14 +484,30 @@ void handleBmp() {
   }
 
   static uint8_t rowBuf[1600];
+  /*
+    One sendContent per 640-byte row + Nagle turns /bmp into a minute
+    of 40ms-stalled writes. Batch rows into big chunks and disable
+    Nagle on the socket.
+  */
+  static uint8_t chunk[8192];
+  uint32_t chunkLen = 0;
   server.setContentLength(fileSize);
   server.send(200, "image/bmp", "");
+  server.client().setNoDelay(true);
   server.sendContent((const char*)hdr, sizeof(hdr));
   server.sendContent((const char*)pal, sizeof(pal));
   for (int y = 0; y < h; y++) {
     memcpy(rowBuf, d->buf + (size_t)y * w, w);
     if (rowSize > (uint32_t)w) memset(rowBuf + w, 0, rowSize - w);
-    server.sendContent((const char*)rowBuf, rowSize);
+    memcpy(chunk + chunkLen, rowBuf, rowSize);
+    chunkLen += rowSize;
+    if (chunkLen > sizeof(chunk) - rowSize || y == h - 1) {
+      server.sendContent((const char*)chunk, chunkLen);
+      chunkLen = 0;
+    }
+    if (!server.client().connected()) {
+      break;
+    }
   }
   esp_camera_fb_return(d);
 }
