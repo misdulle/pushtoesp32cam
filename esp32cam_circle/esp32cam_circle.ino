@@ -101,6 +101,8 @@ unsigned long bmpGrabMs = 0;
 unsigned long bmpSendMs = 0;
 unsigned long bmpTotalMs = 0;
 unsigned long bmpCount = 0;
+size_t jpgLen = 0;
+unsigned long jpgMs = 0;
 
 /*
   Bench heartbeat: blinks the on-board (flash) LED without blocking.
@@ -380,6 +382,9 @@ void handleDebug() {
            String(bmpGrabMs) + " send_ms=" + String(bmpSendMs) +
            " total_ms=" + String(bmpTotalMs) + "\n";
   }
+  if (jpgLen) {
+    msg += "jpg_len=" + String(jpgLen) + " jpg_ms=" + String(jpgMs) + "\n";
+  }
   if (camReady) {
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
@@ -461,10 +466,10 @@ void handleFill() {
 }
 
 /*
-  Current frame as a small JPEG. The grayscale BMP is ~301 kB and, at the
-  moment, painfully slow to push; the JPEG is 10-20x smaller for aiming
-  and focusing. The sensor is switched to JPEG just for this request and
-  back to grayscale afterwards so /pos keeps decoding properly.
+  Current frame as a small JPEG. The grayscale BMP is ~301 kB and slow to
+  push; the frame2jpg() conversion (esp32-camera built-in) shrinks it 10-20x
+  for aiming and focusing, with no pixformat switching -- /pos keeps decoding
+  the same grayscale frames as always.
 */
 void handleJpg() {
   if (!camReady) {
@@ -472,42 +477,27 @@ void handleJpg() {
                 String((unsigned)camErr, HEX) + "\n");
     return;
   }
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) {
-    server.send(503, "text/plain", "ERROR=no sensor\n");
-    return;
-  }
-  camera_fb_t* f = esp_camera_fb_get();   /* drop stale grayscale frame */
-  if (f) esp_camera_fb_return(f);
-  s->set_pixformat(s, PIXFORMAT_JPEG);
-  camera_fb_t* j = NULL;
-  for (int tries = 0; tries < 4; tries++) {
-    delay(120);                           /* let JPEG frames stream in */
-    j = esp_camera_fb_get();
-    if (j && j->len >= 2 && j->buf[0] == 0xFF && j->buf[1] == 0xD8) break;
-    if (j) esp_camera_fb_return(j);
-    j = NULL;
-  }
-  s->set_pixformat(s, PIXFORMAT_GRAYSCALE);
-  if (!j) {
-    server.send(503, "text/plain", "ERROR=jpeg grab failed\n");
+  camera_fb_t* d = esp_camera_fb_get();
+  if (!d) {
+    server.send(503, "text/plain", "ERROR=grab failed\n");
     return;
   }
   unsigned long t0 = millis();
-  size_t jlen = j->len;
-  server.setContentLength(j->len);
+  uint8_t* jpg = NULL;
+  size_t jlen = 0;
+  bool ok = frame2jpg(d, 85, &jpg, &jlen);
+  esp_camera_fb_return(d);
+  if (!ok || !jpg) {
+    server.send(503, "text/plain", "ERROR=jpeg conversion failed\n");
+    return;
+  }
+  server.setContentLength(jlen);
   server.send(200, "image/jpeg", "");
   server.client().setNoDelay(true);
-  server.client().write(j->buf, j->len);
-  esp_camera_fb_return(j);
-  delay(120);                             /* drain one JPEG frame */
-  f = esp_camera_fb_get();
-  if (f) {
-    esp_camera_fb_return(f);
-    f = esp_camera_fb_get();              /* first grayscale frame */
-    if (f) esp_camera_fb_return(f);
-  }
-  Serial.printf("jpg: %u bytes in %lu ms\n", (unsigned)jlen, millis() - t0);
+  server.client().write(jpg, jlen);
+  free(jpg);
+  jpgLen = jlen;
+  jpgMs = millis() - t0;
 }
 
 /* Current frame as an 8-bit grayscale BMP, viewable in a browser. */
