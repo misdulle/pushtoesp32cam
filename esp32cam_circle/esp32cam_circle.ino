@@ -87,9 +87,9 @@ const char* WIFI_PASS = "your-password";
   defaults assume the HA reader at 192.168.4.1 and the DEC reader at
   192.168.4.2. All three must be set for static mode to engage.
 */
-const char* STATIC_IP   = "";   // e.g. "192.168.4.1"
-const char* STATIC_GW   = "";   // e.g. "192.168.4.1"
-const char* STATIC_SN   = "";   // e.g. "255.255.255.0"
+const char* STATIC_IP   = "192.168.1.41";
+const char* STATIC_GW   = "192.168.1.1";
+const char* STATIC_SN   = "255.255.255.0";
 
 WebServer server(80);
 camera_fb_t* fb = NULL;
@@ -435,6 +435,81 @@ void handleReinit() {
   }
 }
 
+/*
+  Raw TCP throughput test: streams n bytes of 0x00, no camera involved.
+  'time curl -o /dev/null http://<ip>/fill?n=300000' separates the radio
+  link from everything else. lwip's send buffer is only 5744 bytes in the
+  prebuilt core, so each burst waits for the client's ACK; a healthy
+  link still manages several MB/s, a bad one stalls ~200 ms per segment.
+*/
+void handleFill() {
+  long n = server.hasArg("n") ? server.arg("n").toInt() : 100000;
+  if (n < 0) n = 100000;
+  if (n > 2000000) n = 2000000;
+  static uint8_t zeros[1436];       /* one full TCP segment */
+  memset(zeros, 0, sizeof(zeros));
+  server.setContentLength((size_t)n);
+  server.send(200, "application/octet-stream", "");
+  server.client().setNoDelay(true);
+  size_t left = (size_t)n;
+  while (left > 0) {
+    size_t want = left < sizeof(zeros) ? left : sizeof(zeros);
+    size_t got = server.client().write(zeros, want);
+    if (got == 0) break;            /* client gone */
+    left -= got;
+  }
+}
+
+/*
+  Current frame as a small JPEG. The grayscale BMP is ~301 kB and, at the
+  moment, painfully slow to push; the JPEG is 10-20x smaller for aiming
+  and focusing. The sensor is switched to JPEG just for this request and
+  back to grayscale afterwards so /pos keeps decoding properly.
+*/
+void handleJpg() {
+  if (!camReady) {
+    server.send(503, "text/plain", "ERROR=camera not ready err=0x" +
+                String((unsigned)camErr, HEX) + "\n");
+    return;
+  }
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) {
+    server.send(503, "text/plain", "ERROR=no sensor\n");
+    return;
+  }
+  camera_fb_t* f = esp_camera_fb_get();   /* drop stale grayscale frame */
+  if (f) esp_camera_fb_return(f);
+  s->set_pixformat(s, PIXFORMAT_JPEG);
+  camera_fb_t* j = NULL;
+  for (int tries = 0; tries < 4; tries++) {
+    delay(120);                           /* let JPEG frames stream in */
+    j = esp_camera_fb_get();
+    if (j && j->len >= 2 && j->buf[0] == 0xFF && j->buf[1] == 0xD8) break;
+    if (j) esp_camera_fb_return(j);
+    j = NULL;
+  }
+  s->set_pixformat(s, PIXFORMAT_GRAYSCALE);
+  if (!j) {
+    server.send(503, "text/plain", "ERROR=jpeg grab failed\n");
+    return;
+  }
+  unsigned long t0 = millis();
+  size_t jlen = j->len;
+  server.setContentLength(j->len);
+  server.send(200, "image/jpeg", "");
+  server.client().setNoDelay(true);
+  server.client().write(j->buf, j->len);
+  esp_camera_fb_return(j);
+  delay(120);                             /* drain one JPEG frame */
+  f = esp_camera_fb_get();
+  if (f) {
+    esp_camera_fb_return(f);
+    f = esp_camera_fb_get();              /* first grayscale frame */
+    if (f) esp_camera_fb_return(f);
+  }
+  Serial.printf("jpg: %u bytes in %lu ms\n", (unsigned)jlen, millis() - t0);
+}
+
 /* Current frame as an 8-bit grayscale BMP, viewable in a browser. */
 void handleBmp() {
   if (!camReady) {
@@ -562,6 +637,8 @@ void setup() {
   server.on("/raw", HTTP_GET, handleRaw);
   server.on("/debug", HTTP_GET, handleDebug);
   server.on("/bmp", HTTP_GET, handleBmp);
+  server.on("/jpg", HTTP_GET, handleJpg);
+  server.on("/fill", HTTP_GET, handleFill);
   server.on("/init", HTTP_GET, handleReinit);
   server.begin();
   Serial.println("web server up, initializing camera");
