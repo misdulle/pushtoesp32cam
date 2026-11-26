@@ -176,10 +176,7 @@ int findWidestDarkRun(const uint8_t* v, int len, uint8_t thr, int* width_out) {
   return bestStart;
 }
 
-bool decodeCircle(int* code_out) {
-  fb = esp_camera_fb_get();
-  if (!fb) return false;
-
+bool decodeFb(camera_fb_t* fb, int* code_out) {
   int w = fb->width;
   int rStart = (int)(BAND_ROW_START * fb->height / 480.0f + 0.5f);
   int rEnd = (int)(BAND_ROW_END * fb->height / 480.0f + 0.5f);
@@ -258,6 +255,14 @@ bool decodeCircle(int* code_out) {
   esp_camera_fb_return(fb);
   *code_out = (int)grayToBinary(gray);
   return true;
+}
+
+bool decodeCircle(int* code_out) {
+  if (!camReady) return false;
+  fb = esp_camera_fb_get();
+  if (!fb) return false;
+  /* decodeFb releases the buffer itself on every path */
+  return decodeFb(fb, code_out);
 }
 
 void handlePos() {
@@ -438,6 +443,133 @@ void handleReinit() {
     server.send(503, "text/plain", "ERROR=camera init failed err=0x" +
                 String((unsigned)err, HEX) + "\n");
   }
+}
+
+/* Framesize selector by name for /bench. */
+static bool framesizeFromName(String n, framesize_t* out) {
+  n.toLowerCase();
+  if (n == "qqvga") *out = FRAMESIZE_QQVGA;
+  else if (n == "qvga") *out = FRAMESIZE_QVGA;
+  else if (n == "vga") *out = FRAMESIZE_VGA;
+  else if (n == "svga") *out = FRAMESIZE_SVGA;
+  else if (n == "xga") *out = FRAMESIZE_XGA;
+  else if (n == "hd") *out = FRAMESIZE_HD;
+  else if (n == "sxga") *out = FRAMESIZE_SXGA;
+  else if (n == "uxga") *out = FRAMESIZE_UXGA;
+  else return false;
+  return true;
+}
+
+/*
+  Timing benchmark: sensor read (fresh-frame wait) vs decode, at the
+  current framesize or across the whole ladder with ?all=1.
+    /bench                 measure current size
+    /bench?fs=vga          measure after switching to VGA (restored after)
+    /bench?fs=uxga&keep=1  switch and stay there
+    /bench?all=1           sweep qqvga..uxga, restore original size
+  The 'get_ms' figure is the wait for one FRESH frame after releasing the
+  previous buffer (fb_count=1, GRAB_LATEST), i.e. the sensor period; the
+  achievable continuous rate is 1000/get_ms fps.
+*/
+void handleBench() {
+  if (!camReady) {
+    server.send(503, "text/plain", "ERROR=camera not ready err=0x" +
+                String((unsigned)camErr, HEX) + "\n");
+    return;
+  }
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) {
+    server.send(503, "text/plain", "ERROR=no sensor\n");
+    return;
+  }
+  framesize_t origFs = (framesize_t)s->status.framesize;
+  bool restore = true;
+
+  String body = "";
+  if (server.hasArg("all")) {
+    static const framesize_t ladder[] = {
+      FRAMESIZE_QQVGA, FRAMESIZE_QVGA, FRAMESIZE_VGA, FRAMESIZE_SVGA,
+      FRAMESIZE_XGA, FRAMESIZE_HD, FRAMESIZE_SXGA, FRAMESIZE_UXGA
+    };
+    for (unsigned i = 0; i < sizeof(ladder) / sizeof(ladder[0]); i++) {
+      if (s->set_framesize(s, ladder[i]) != 0) {
+        body += "fs=" + String((int)ladder[i]) + " set failed\n";
+        continue;
+      }
+      delay(150);
+      camera_fb_t* fb = esp_camera_fb_get();
+      if (fb) esp_camera_fb_return(fb);
+      unsigned long t0 = micros();
+      fb = esp_camera_fb_get();
+      unsigned long getUs = micros() - t0;
+      if (!fb) {
+        body += "get failed\n";
+        continue;
+      }
+      unsigned long t1 = micros();
+      int code = -1;
+      bool ok = decodeFb(fb, &code);
+      unsigned long decUs = micros() - t1;
+      float getMs = getUs / 1000.0f;
+      body += "fs=" + String((int)ladder[i]) +
+              " " + String(fb->width) + "x" + String(fb->height) +
+              " get_ms=" + String(getMs, 1) +
+              " decode_ms=" + String(decUs / 1000.0f, 2) +
+              " fps_max=" + String(1000.0f / getMs, 1) +
+              " ok=" + (ok ? String("yes code=") + String(code) : String("no")) +
+              "\n";
+    }
+    s->set_framesize(s, origFs);
+    delay(150);
+    server.send(200, "text/plain", body);
+    return;
+  }
+
+  if (server.hasArg("fs")) {
+    framesize_t fs;
+    if (!framesizeFromName(server.arg("fs"), &fs)) {
+      server.send(400, "text/plain", "ERROR=bad fs name\n");
+      return;
+    }
+    if (s->set_framesize(s, fs) != 0) {
+      server.send(503, "text/plain", "ERROR=set_framesize failed\n");
+      return;
+    }
+    if (server.hasArg("keep")) restore = false;
+    delay(150);
+  }
+
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (fb) esp_camera_fb_return(fb);
+  unsigned long t0 = micros();
+  fb = esp_camera_fb_get();
+  unsigned long getUs = micros() - t0;
+  if (!fb) {
+    if (restore) {
+      s->set_framesize(s, origFs);
+      delay(150);
+    }
+    server.send(503, "text/plain", "ERROR=grab failed\n");
+    return;
+  }
+  int fw = fb->width, fh = fb->height;
+  unsigned long t1 = micros();
+  int code = -1;
+  bool ok = decodeFb(fb, &code);
+  unsigned long decUs = micros() - t1;
+  float getMs = getUs / 1000.0f;
+  String msg = "frame=" + String(fw) + "x" + String(fh) +
+               " get_ms=" + String(getMs, 1) +
+               " decode_ms=" + String(decUs / 1000.0f, 2) +
+               " fps_max=" + String(1000.0f / getMs, 1) + "\n";
+  msg += ok ? ("decode=ok code=" + String(code) +
+               " value=" + String(angleFromCode(code), 5) + "\n")
+            : "decode=failed\n";
+  if (restore) {
+    s->set_framesize(s, origFs);
+    delay(150);
+  }
+  server.send(200, "text/plain", msg);
 }
 
 /*
@@ -628,6 +760,7 @@ void setup() {
   server.on("/debug", HTTP_GET, handleDebug);
   server.on("/bmp", HTTP_GET, handleBmp);
   server.on("/jpg", HTTP_GET, handleJpg);
+  server.on("/bench", HTTP_GET, handleBench);
   server.on("/fill", HTTP_GET, handleFill);
   server.on("/init", HTTP_GET, handleReinit);
   server.begin();
