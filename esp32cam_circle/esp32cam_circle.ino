@@ -97,6 +97,10 @@ camera_fb_t* fb = NULL;
 bool camReady = false;
 esp_err_t camErr = ESP_FAIL;
 unsigned long camInitCount = 0;
+unsigned long bmpGrabMs = 0;
+unsigned long bmpSendMs = 0;
+unsigned long bmpTotalMs = 0;
+unsigned long bmpCount = 0;
 
 /*
   Bench heartbeat: blinks the on-board (flash) LED without blocking.
@@ -371,6 +375,11 @@ void handleDebug() {
   msg += "heap_free=" + String(ESP.getFreeHeap()) + "\n";
   msg += "ip=" + WiFi.localIP().toString() + "\n";
   msg += "rssi=" + String(WiFi.RSSI()) + "\n";
+  if (bmpCount) {
+    msg += "bmp_frames=" + String(bmpCount) + " grab_ms=" +
+           String(bmpGrabMs) + " send_ms=" + String(bmpSendMs) +
+           " total_ms=" + String(bmpTotalMs) + "\n";
+  }
   if (camReady) {
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
@@ -433,11 +442,13 @@ void handleBmp() {
                 String((unsigned)camErr, HEX) + "\n");
     return;
   }
+  unsigned long t0 = millis();
   camera_fb_t* d = esp_camera_fb_get();
   if (!d) {
     server.send(503, "text/plain", "ERROR=grab failed\n");
     return;
   }
+  unsigned long t1 = millis();
   int w = d->width;
   int h = d->height;
   uint32_t rowSize = (w + 3) & ~3u;
@@ -510,12 +521,21 @@ void handleBmp() {
     }
   }
   esp_camera_fb_return(d);
+  bmpGrabMs = t1 - t0;
+  bmpSendMs = millis() - t1;
+  bmpTotalMs = millis() - t0;
+  bmpCount++;
 }
 
 void setup() {
   Serial.begin(115200);
 
   WiFi.mode(WIFI_STA);
+  /*
+    Modem sleep (default on) throttles TCP badly; a circle reader is
+    mains powered - keep the radio awake.
+  */
+  WiFi.setSleep(false);
   if (STATIC_IP[0] && STATIC_GW[0] && STATIC_SN[0])
   {
     IPAddress ip, gw, sn;
