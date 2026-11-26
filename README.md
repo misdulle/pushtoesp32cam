@@ -249,6 +249,31 @@ then connect from SkyChart/Stellarium/KStars (INDI driver
 Nothing moves at any point; the driver is strictly a coordinate reader
 plus the audio push-to guide.
 
+## Test band image generator
+
+`devtools/make_test_image.py` renders the code band exactly as the
+decoder expects it (white lead-in, 12-cell marker, 1-cell gap, 9 Gray
+cells, tail gap) with a graduation tick ruler underneath - the layout
+of the original reference images. Use it as a print/screen reference
+for laying out the real circle bands, or as a decode test target:
+
+```
+python3 devtools/make_test_image.py --codes 25 150          # HA codes
+python3 devtools/make_test_image.py --codes 90 --axis dec
+python3 devtools/make_test_image.py --codes 0 287 --noise 60  # robustness
+```
+
+Output is an 8-bit grayscale BMP (same format as `GET /bmp`). Every
+image is self-checked before it is written: a Python mirror of the
+ESP32 decode pipeline (row profile -> Otsu -> widest dark run ->
+11..13-cell guard -> 9 windows -> Gray) must recover the requested
+codes from the strip, including the two-codes-in-view case. Validated:
+all 288 HA + 360 DEC codes decode at +/-40 luma noise. Two codes side
+by side in one frame: a full-frame decode returns the first code (its
+marker wins the widest-dark-run search); crop or frame a single group
+for the second. `example_test_band.bmp` is a pre-generated example
+(codes 25 and 150).
+
 ## Next steps
 
 - Fine reading: overlay detection of the original long/short
