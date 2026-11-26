@@ -275,21 +275,32 @@ bool decodeCircle(int* code_out) {
   return decodeFb(fb, code_out);
 }
 
+/*
+  Text response helper: mirrors every response on Serial, so the same
+  information is available on the console (watch with dtr=off,rts=off --
+  see README) and over HTTP.
+*/
+void reply(int code, String msg) {
+  if (!msg.endsWith("\n")) msg += "\n";
+  Serial.printf("[HTTP %d %s] %s", code, server.uri().c_str(), msg.c_str());
+  server.send(code, "text/plain", msg);
+}
+
 void handlePos() {
   int code = -1;
   if (!camReady) {
-    server.send(503, "text/plain", "ERROR=camera not ready err=0x" +
-                String((unsigned)camErr, HEX) + "\n");
+    reply(503, "ERROR=camera not ready err=0x" +
+          String((unsigned)camErr, HEX) + "\n");
     return;
   }
   if (!decodeCircle(&code)) {
-    server.send(503, "text/plain", "ERROR=decode failed\n");
+    reply(503, "ERROR=decode failed\n");
     return;
   }
   float value = angleFromCode(code);
   if (isnan(value)) {
     String msg = "ERROR=code out of range " + String(code) + "\n";
-    server.send(503, "text/plain", msg);
+    reply(503, msg);
     return;
   }
   String msg = "AXIS=";
@@ -298,21 +309,21 @@ void handlePos() {
   msg += "\nVALUE=";
   msg += String(value, 5);
   msg += "\n";
-  server.send(200, "text/plain", msg);
+  reply(200, msg);
 }
 
 void handleRaw() {
   int code = -1;
   if (!camReady) {
-    server.send(503, "text/plain", "ERROR=camera not ready err=0x" +
-                String((unsigned)camErr, HEX) + "\n");
+    reply(503, "ERROR=camera not ready err=0x" +
+          String((unsigned)camErr, HEX) + "\n");
     return;
   }
   if (!decodeCircle(&code)) {
-    server.send(503, "text/plain", "ERROR=decode failed\n");
+    reply(503, "ERROR=decode failed\n");
     return;
   }
-  server.send(200, "text/plain", String(code) + "\n");
+  reply(200, String(code) + "\n");
 }
 
 esp_err_t cameraInit() {
@@ -442,16 +453,16 @@ void handleDebug() {
       msg += "frame=GRAB FAILED\n";
     }
   }
-  server.send(200, "text/plain", msg);
+  reply(200, msg);
 }
 
 void handleReinit() {
   esp_err_t err = cameraInit();
   if (err == ESP_OK) {
-    server.send(200, "text/plain", "camera initialized\n");
+    reply(200, "camera initialized\n");
   } else {
-    server.send(503, "text/plain", "ERROR=camera init failed err=0x" +
-                String((unsigned)err, HEX) + "\n");
+    reply(503, "ERROR=camera init failed err=0x" +
+          String((unsigned)err, HEX) + "\n");
   }
 }
 
@@ -483,13 +494,13 @@ static bool framesizeFromName(String n, framesize_t* out) {
 */
 void handleBench() {
   if (!camReady) {
-    server.send(503, "text/plain", "ERROR=camera not ready err=0x" +
-                String((unsigned)camErr, HEX) + "\n");
+    reply(503, "ERROR=camera not ready err=0x" +
+          String((unsigned)camErr, HEX) + "\n");
     return;
   }
   sensor_t* s = esp_camera_sensor_get();
   if (!s) {
-    server.send(503, "text/plain", "ERROR=no sensor\n");
+    reply(503, "ERROR=no sensor\n");
     return;
   }
   framesize_t origFs = (framesize_t)s->status.framesize;
@@ -531,18 +542,18 @@ void handleBench() {
     }
     s->set_framesize(s, origFs);
     delay(150);
-    server.send(200, "text/plain", body);
+    reply(200, body);
     return;
   }
 
   if (server.hasArg("fs")) {
     framesize_t fs;
     if (!framesizeFromName(server.arg("fs"), &fs)) {
-      server.send(400, "text/plain", "ERROR=bad fs name\n");
+      reply(400, "ERROR=bad fs name\n");
       return;
     }
     if (s->set_framesize(s, fs) != 0) {
-      server.send(503, "text/plain", "ERROR=set_framesize failed\n");
+      reply(503, "ERROR=set_framesize failed\n");
       return;
     }
     if (server.hasArg("keep")) restore = false;
@@ -559,7 +570,7 @@ void handleBench() {
       s->set_framesize(s, origFs);
       delay(150);
     }
-    server.send(503, "text/plain", "ERROR=grab failed\n");
+    reply(503, "ERROR=grab failed\n");
     return;
   }
   int fw = fb->width, fh = fb->height;
@@ -579,7 +590,7 @@ void handleBench() {
     s->set_framesize(s, origFs);
     delay(150);
   }
-  server.send(200, "text/plain", msg);
+  reply(200, msg);
 }
 
 /*
@@ -605,6 +616,8 @@ void handleFill() {
     if (got == 0) break;            /* client gone */
     left -= got;
   }
+  Serial.printf("[/fill] %lu of %ld bytes sent\n",
+                (unsigned long)((unsigned long)n - left), n);
 }
 
 /*
@@ -615,13 +628,13 @@ void handleFill() {
 */
 void handleJpg() {
   if (!camReady) {
-    server.send(503, "text/plain", "ERROR=camera not ready err=0x" +
-                String((unsigned)camErr, HEX) + "\n");
+    reply(503, "ERROR=camera not ready err=0x" +
+          String((unsigned)camErr, HEX) + "\n");
     return;
   }
   camera_fb_t* d = esp_camera_fb_get();
   if (!d) {
-    server.send(503, "text/plain", "ERROR=grab failed\n");
+    reply(503, "ERROR=grab failed\n");
     return;
   }
   unsigned long t0 = millis();
@@ -630,7 +643,7 @@ void handleJpg() {
   bool ok = frame2jpg(d, 85, &jpg, &jlen);
   esp_camera_fb_return(d);
   if (!ok || !jpg) {
-    server.send(503, "text/plain", "ERROR=jpeg conversion failed\n");
+    reply(503, "ERROR=jpeg conversion failed\n");
     return;
   }
   server.setContentLength(jlen);
@@ -640,19 +653,20 @@ void handleJpg() {
   free(jpg);
   jpgLen = jlen;
   jpgMs = millis() - t0;
+  Serial.printf("[/jpg] %u bytes in %lu ms\n", (unsigned)jpgLen, jpgMs);
 }
 
 /* Current frame as an 8-bit grayscale BMP, viewable in a browser. */
 void handleBmp() {
   if (!camReady) {
-    server.send(503, "text/plain", "ERROR=camera not ready err=0x" +
-                String((unsigned)camErr, HEX) + "\n");
+    reply(503, "ERROR=camera not ready err=0x" +
+          String((unsigned)camErr, HEX) + "\n");
     return;
   }
   unsigned long t0 = millis();
   camera_fb_t* d = esp_camera_fb_get();
   if (!d) {
-    server.send(503, "text/plain", "ERROR=grab failed\n");
+    reply(503, "ERROR=grab failed\n");
     return;
   }
   unsigned long t1 = millis();
@@ -732,6 +746,8 @@ void handleBmp() {
   bmpSendMs = millis() - t1;
   bmpTotalMs = millis() - t0;
   bmpCount++;
+  Serial.printf("[/bmp] %dx%d in %lu ms (grab %lu ms, send %lu ms)\n",
+                w, h, bmpTotalMs, bmpGrabMs, bmpSendMs);
 }
 
 void setup() {
