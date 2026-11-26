@@ -46,6 +46,16 @@
 #define CIRCLE_AXIS AXIS_HA
 #endif
 
+/*
+  Working framesize when PSRAM is available (decode geometry scales with
+  the frame). SVGA (800x600) sustains ~5.6 fps with the OV3660 at 20 MHz
+  XCLK / fixed exposure -- the biggest image that still meets the 5 fps
+  target; XGA drops to ~2.8 fps. See GET /bench for the measured ladder.
+*/
+#ifndef CIRCLE_FRAMESIZE
+#define CIRCLE_FRAMESIZE FRAMESIZE_SVGA
+#endif
+
 #define N_BITS 9
 
 /*
@@ -334,7 +344,7 @@ esp_err_t cameraInit() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_GRAYSCALE;
-  config.frame_size = psram ? FRAMESIZE_VGA : FRAMESIZE_QVGA;
+  config.frame_size = psram ? CIRCLE_FRAMESIZE : FRAMESIZE_QVGA;
   config.jpeg_quality = 12;
   config.fb_count = 1;
   config.fb_location = psram ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;

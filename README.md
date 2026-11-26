@@ -67,8 +67,21 @@ arduino-cli compile --fqbn esp32:esp32:esp32cam \
 1. Set `WIFI_SSID` / `WIFI_PASS`.
 2. Pick the axis by editing `CIRCLE_AXIS`, or leave the file as-is and
    use the `-DCIRCLE_AXIS=1` override above for the DEC camera.
-3. Point the camera squarely at the code band so the band crosses the
+3. Set the per-camera `STATIC_IP` (plus gateway/mask) before flashing
+   each unit so the two cameras don't collide; empty strings fall back
+   to DHCP.
+4. Point the camera squarely at the code band so the band crosses the
    frame horizontally.
+
+Watching the serial console:
+
+```
+arduino-cli monitor -p /dev/ttyUSB2 -c baudrate=115200,dtr=off,rts=off
+```
+
+`dtr=off,rts=off` is important: the default DTR/RTS assert on attach
+can reset the board mid-boot, truncating the ROM output (a plain
+monitor looks like the sketch dies after `boot:0x13`).
 
 Endpoints:
 
@@ -81,9 +94,17 @@ Endpoints:
   PSRAM size/free, free heap, grabbed frame size, WiFi IP/RSSI, and
   min/max/mean levels over the calibrated band rows (exposure
   check: dark cells well under ~100, white well over ~180).
-- `GET /bmp` -> the current frame as a grayscale BMP, viewable
-  directly in a browser - point the camera at the band, focus, then
-  verify the band sits inside the calibrated row range.
+- `GET /jpg` -> the current grayscale frame converted with
+  `frame2jpg()` (~15-60 kB, ~0.3 s) - the fast way to aim and focus;
+  the sensor stays in grayscale, so `/pos` is unaffected.
+- `GET /bmp` -> the current frame as a full-resolution grayscale BMP
+  (~301 kB at VGA, slower to transfer) - pixel-exact inspection.
+- `GET /bench` -> timing: sensor frame wait vs decode time. With
+  `?fs=<qqvga|qvga|vga|svga|xga|hd|sxga|uxga>` measures at that size
+  (restores the default afterwards; add `&keep=1` to stay there),
+  with `?all=1` sweeps the whole ladder. `fps_max` is the continuous
+  rate; the working default is SVGA (800x600, ~5.6 fps measured on the
+  OV3660 - the biggest image meeting the 5 fps target).
 - `GET /init` -> retry camera init without rebooting (the sketch never
   restarts on camera failure: WiFi and the diagnostics endpoints stay
   up so you can iterate over HTTP alone).
