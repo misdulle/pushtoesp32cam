@@ -251,11 +251,17 @@ plus the audio push-to guide.
 
 ## Test band image generator
 
-`devtools/make_test_image.py` renders the code band exactly as the
-decoder expects it (white lead-in, 12-cell marker, 1-cell gap, 9 Gray
-cells, tail gap) with a graduation tick ruler underneath - the layout
-of the original reference images. Use it as a print/screen reference
-for laying out the real circle bands, or as a decode test target:
+`devtools/make_test_image.py` renders a synthetic field of view in the
+style of the reference images: a mobile part carrying the graduated
+marks (long hourly, medium 5-min, short 1-min radial lines) and the
+code band -- the code cells are radial stripes parallel to the marks,
+the codes only number the 5-min graduations -- plus the fixed part, a
+single pointer line between two short marks (the fine reading is the
+pointer position interpolated between graduated lines). Per code the
+band is the layout the decoder expects (white lead-in, 12-cell marker,
+1-cell gap, 9 Gray cells, tail gap), and the marks/pointer stay outside
+the decoded band rows. Use it as a print/screen reference for laying
+out the real circle bands, or as a decode test target:
 
 ```
 python3 devtools/make_test_image.py --codes 25 150          # HA codes

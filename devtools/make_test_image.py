@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
 """Generate a synthetic code-band test image (graduated-circle style).
 
-Renders, per requested code, the band layout the ESP32-CAM decoder
-expects, laid out on a white strip with a graduation tick ruler beneath
-it -- in the style of the reference images from the original prompt:
+The field of view has two parts, as on the real instrument:
+
+- Mobile part (the circle): radial graduated marks -- long (hourly),
+  medium (5 min: one code each) and short (1 min) lines -- plus the
+  code band. The codes only put a number on the 5-min medium marks;
+  the code cells are radial stripes like the marks themselves, so the
+  code band runs PARALLEL to the graduated lines, never across them.
+- Fixed part: a single black pointer line, drawn at a fixed offset
+  (deliberately between two short marks) -- the fine reading comes
+  from interpolating the pointer position between graduated lines.
+
+Per code, the band layout the ESP32-CAM decoder expects:
 
   [2-cell white lead-in][12-cell dark marker][1-cell white gap]
   [9 Gray data cells, MSB first, dark=1][>=2-cell white gap]
 
-The image is written as an 8-bit grayscale BMP (same format as the
-camera's GET /bmp), and every generated image is self-checked: a Python
-mirror of the ESP32 decode pipeline (row profile -> Otsu -> widest dark
-run -> guard -> 9 windows -> Gray) must recover the requested codes
-before the file is written. Two codes side by side also exercise the
-"adjacent dark runs in view" case: the full-strip decode must return
-the first code, and the strip after the first group must yield the
-second.
+The pointer and the graduated marks stay outside the decoded band rows
+so the row profile is untouched. The image is written as an 8-bit
+grayscale BMP (same format as the camera's GET /bmp), and every
+generated image is self-checked: a Python mirror of the ESP32 decode
+pipeline (row profile -> Otsu -> widest dark run -> guard -> 9 windows
+-> Gray) must recover the requested codes before the file is written.
+Two codes side by side also exercise the "adjacent dark runs in view"
+case: the full-strip decode must return the first code, and the strip
+after the first group must yield the second.
 
 Examples:
   python3 make_test_image.py                        # codes 25 and 150
@@ -36,13 +46,23 @@ LEAD_CELLS = 2
 TAIL_CELLS = 3
 N_BITS = 9
 
-# Vertical layout in rows (mimics the camera framing: a thin band strip
-# around 45-55% of frame height, ruler ticks below).
-TOP_MARGIN = 60
+# Vertical layout (radial direction is vertical). The pointer line and
+# the graduated marks sit OUTSIDE the decoded band rows.
+TOP_MARGIN = 14
+POINTER_ROWS = 60       # fixed part: single pointer line lives here
+MARKS_GAP = 6           # white gap between pointer region and marks
+MARKS_ROWS = 40         # mobile part: graduated marks (anchored at top)
+MARKS_BAND_GAP = 2
 BAND_ROWS = 40          # matches the calibrated BAND_ROW_START..END width
-RULER_GAP = 20
-RULER_ROWS = 40
-BOTTOM_MARGIN = 60
+BOTTOM_MARGIN = 58
+
+POINTER_X_FRAC = 2.37   # pointer at 2.37 sectors: deliberately between marks
+MARK_LEN_SHORT = 16     # 1-min marks
+MARK_LEN_MEDIUM = 28    # 5-min marks (these carry the codes)
+MARK_LEN_LONG = 40      # hourly marks
+MARK_WIDTH = 3
+SECTOR_MINUTES = 5      # one code per 5-min graduation
+SECTORS_PER_LONG = 12   # hourly long mark (12 x 5 min = 1 h)
 
 
 def gray_from_code(n):
@@ -61,19 +81,45 @@ def code_value(n, axis):
 
 def render(codes, cell, cal_cell_px, noise=0, seed=1):
     """Return (pixels, w, h) of the test strip; pixels = list of rows."""
-    # Two groups per image: each needs lead+marker+gap+9+tail cells.
+    # One code group per 5-min sector: lead+marker+gap+9 data+tail cells.
     group_cells = LEAD_CELLS + MARKER_CELLS + GAP_CELLS + N_BITS + TAIL_CELLS
     groups = len(codes)
     inter_gap = 4 * cell          # white separation between the two groups
     left_margin = 2 * cell
-    w = left_margin + groups * group_cells * cell + (groups - 1) * inter_gap \
-        + 2 * cell
-    h = TOP_MARGIN + BAND_ROWS + RULER_GAP + RULER_ROWS + BOTTOM_MARGIN
-    band_top = TOP_MARGIN
+    sector_px = group_cells * cell + inter_gap
+    w = left_margin + groups * sector_px + 2 * cell
+    h = (TOP_MARGIN + POINTER_ROWS + MARKS_GAP + MARKS_ROWS +
+         MARKS_BAND_GAP + BAND_ROWS + BOTTOM_MARGIN)
+    marks_top = TOP_MARGIN + POINTER_ROWS + MARKS_GAP
+    band_top = marks_top + MARKS_ROWS + MARKS_BAND_GAP
     band_bot = band_top + BAND_ROWS
 
     pix = [[255] * w for _ in range(h)]
 
+    # Mobile part, graduated marks: anchored radial lines above the band.
+    # Medium (5-min) marks align with each code group's lead-in; short
+    # 1-min marks subdivide each sector (4 per 5 min); a long mark every
+    # SECTORS_PER_LONG sectors (1 h). All parallel to the code cells.
+    mark_rows = {"s": (marks_top, marks_top + MARK_LEN_SHORT),
+                 "m": (marks_top, marks_top + MARK_LEN_MEDIUM),
+                 "l": (marks_top, marks_top + MARK_LEN_LONG)}
+
+    def vline(x0, y0, y1, width=MARK_WIDTH):
+        for xx in range(max(0, x0), min(w, x0 + width)):
+            for yy in range(max(0, y0), min(h, y1)):
+                pix[yy][xx] = 0
+
+    n_sectors = (w - left_margin) // sector_px + 1
+    for k in range(n_sectors):
+        xm = left_margin + k * sector_px
+        vline(xm, *mark_rows["m"])
+        for j in range(1, SECTOR_MINUTES):
+            xs = xm + j * sector_px // SECTOR_MINUTES
+            vline(xs, *mark_rows["s"])
+        if k % SECTORS_PER_LONG == 0:
+            vline(xm, *mark_rows["l"])
+
+    # Mobile part, code band: radial cells, one group per sector.
     x = left_margin
     group_spans = []
     for n in codes:
@@ -88,24 +134,14 @@ def render(codes, cell, cal_cell_px, noise=0, seed=1):
                 for xx in range(i * cell, (i + 1) * cell):
                     for yy in range(band_top, band_bot):
                         pix[yy][start + xx] = 0
-        x += group_cells * cell + inter_gap
+        x += sector_px
         group_spans.append((start - cell, start + group_cells * cell + cell))
 
-    # Graduation tick ruler below the band: baseline + ticks, minor every
-    # cell pitch, major every 5 cells, aligned with group boundaries.
-    ruler_top = band_bot + RULER_GAP
-    for xx in range(0, w):
-        pix[ruler_top][xx] = 0
-        pix[ruler_top + 1][xx] = 0
-    for i in range(0, (w - left_margin) // cell + 2):
-        xx = left_margin + i * cell
-        if xx >= w - 1:
-            break
-        tick = 22 if i % 5 == 0 else 10
-        for yy in range(ruler_top, min(ruler_top + tick, h)):
-            pix[yy][xx] = 0
-            if xx + 1 < w:
-                pix[yy][xx + 1] = 0
+    # Fixed part: a single black pointer line between two short marks
+    # (the fine reading is the pointer's interpolated position relative
+    # to the graduated lines). It stays clear of the band rows.
+    x_ptr = left_margin + int(POINTER_X_FRAC * sector_px)
+    vline(x_ptr, TOP_MARGIN, TOP_MARGIN + POINTER_ROWS)
 
     if noise:
         rng = random.Random(seed)
