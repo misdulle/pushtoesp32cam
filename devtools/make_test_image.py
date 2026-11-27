@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
 """Generate a synthetic code-band test image (graduated-circle style).
 
-The field of view has two parts, as on the real instrument:
+Measured on the real instrument (and confirmed): the mobile part moves
+VERTICALLY through the field of view -- the tangential direction is the
+camera's Y axis, the radial direction is X. The FOV has two parts:
 
-- Mobile part (the circle): radial graduated marks -- long (hourly),
-  medium (5 min: one code each) and short (1 min) lines -- plus the
-  code strips. Every code strip is a radial band running PARALLEL to
-  the graduated bars: its cells are stacked one after another ALONG
-  the radius ([lead-in][12-cell marker][gap][9 Gray cells][tail]),
-  one cell wide tangentially. The codes only put a number on the
-  5-min medium marks (each strip sits next to its mark).
-- Fixed part: a single black pointer line, drawn centered in the FOV
-  at mid-X (the decoder reads the strip nearest to it) -- the fine
-  reading comes from interpolating the pointer position between
-  graduated lines.
+- Mobile part (the circle), in two radial bands side by side:
+  - LEFT: the code strips. Each strip is 27 cells laid out ALONG THE
+    RADIUS (left to right: [2-cell lead-in][12-cell dark marker]
+    [1-cell gap][9 Gray data cells, MSB nearest the marker][3-cell
+    tail]), one cell tall. Strips stack vertically, one per 5-min
+    graduation, each ALIGNED with its long (5-min) mark: same height,
+    codes only put a number on that mark.
+  - RIGHT: the graduated marks, anchored at the rim: long (5-min,
+    70% of the band, at each strip's height) and short (1-min, 40%,
+    at the fifths between).
+- Fixed part: a single thin pointer line, HORIZONTAL (parallel to the
+  marks), spanning the FOV at a fixed height (mid-FOV here). The fine
+  reading is the pointer height interpolated between graduated lines.
 
 The image is written as an 8-bit grayscale BMP (same format as the
 camera's GET /bmp), and every generated image is self-checked by a
 Python mirror of the intended ESP32 decode pipeline for this layout:
-find the strip's column window (dark coverage per column, width
-filtered so thin marks/pointer are rejected, strip chosen nearest
-the FOV mid-line where the fixed pointer sits), build the radial
-profile, then Otsu -> widest dark run (12-cell marker) -> guard ->
-9 windows -> Gray. Two strips in one frame exercise the "adjacent
-strips in view" case: the full-frame decode returns the strip
-nearest mid-X (where the pointer is drawn); with that strip
-cropped away the decoder must lock onto the other one.
+per-row dark coverage over the code-band columns (width-filtered so
+the thin marks/pointer are rejected), strip chosen nearest mid-height
+(where the pointer sits), radial profile along the strip's rows, then
+Otsu -> widest dark run (12-cell marker) -> guard -> 9 windows -> Gray.
+Two strips in one frame exercise the "adjacent strips in view" case:
+the full-frame decode returns the strip nearest mid-height (the one
+the pointer crosses); with that strip cropped away the decoder must
+lock onto the other one.
 
 Examples:
   python3 make_test_image.py                        # codes 25 and 150
@@ -47,18 +51,19 @@ TAIL_CELLS = 3
 N_BITS = 9
 GROUP_CELLS = LEAD_CELLS + MARKER_CELLS + GAP_CELLS + N_BITS + TAIL_CELLS
 
-# Geometry: radial direction = vertical (rows). Everything on the mobile
-# part is a radial strip; the fixed pointer is a radial line too.
+# Geometry: tangential direction = vertical (rows), radial = columns.
+# LEFT radial band = code strips, RIGHT radial band = graduated marks.
 TOP_MARGIN = 40
 BOTTOM_MARGIN = 40
-SECTOR_CELLS = 8           # tangential sector pitch (1 code = 5 min)
-STRIP_OFFSET_CELLS = 3     # strip position inside its sector
-POINTER_SECTOR_FRAC = 1.0  # fixed pointer: centered in the FOV (mid-X)
+LEFT_MARGIN_CELLS = 2
+GAP_TO_TICS_CELLS = 2
+RIGHT_MARGIN_CELLS = 2
+TIC_BAND_CELLS = 12       # radial width of the graduated-marks band
+SECTOR_CELLS = 8          # tangential sector pitch (1 code = 5 min)
 MARK_WIDTH = 3
 POINTER_WIDTH = 3
-MARK_FRAC_SHORT = 0.4      # 1-min marks: 40% of the radial band
-MARK_FRAC_MEDIUM = 0.7     # 5-min marks (these carry the codes)
-SECTORS_PER_LONG = 12      # hourly long mark (12 x 5 min = 1 h)
+MARK_FRAC_SHORT = 0.4     # 1-min marks: 40% of the tic band
+MARK_FRAC_LONG = 0.7      # 5-min marks (these carry the codes)
 
 
 def gray_from_code(n):
@@ -76,67 +81,57 @@ def code_value(n, axis):
 
 
 def render(codes, cell, cal_cell_px, noise=0, seed=1):
-    """Return (pixels, w, h, strip_spans, strip_top, strip_bot)."""
-    groups = len(codes)
+    """Return (pix, w, h, strip_rows, band_cols).
+
+    strip_rows[k] = (y0, y1) of code k's strip; band_cols = (x0, x1) of
+    the code band (the strips' radial extent).
+    """
+    left = LEFT_MARGIN_CELLS * cell
+    band_x0 = left
+    band_x1 = left + GROUP_CELLS * cell
+    tics_x1 = band_x1 + GAP_TO_TICS_CELLS * cell + TIC_BAND_CELLS * cell
+    w = tics_x1 + RIGHT_MARGIN_CELLS * cell
     sector = SECTOR_CELLS * cell
-    left = 2 * cell
-    w = left + groups * sector + 2 * cell
-    h = TOP_MARGIN + GROUP_CELLS * cell + BOTTOM_MARGIN
-    top = TOP_MARGIN
-    bot = top + GROUP_CELLS * cell
+    h = TOP_MARGIN + len(codes) * sector + BOTTOM_MARGIN
 
     pix = [[255] * w for _ in range(h)]
 
-    strip_ranges = []
-    for k in range(groups):
-        xs = left + k * sector + STRIP_OFFSET_CELLS * cell
-        strip_ranges.append((xs, xs + cell))
+    def hline(y0, x0, x1, width=MARK_WIDTH):
+        for yy in range(max(0, y0), min(h, y0 + width)):
+            row = pix[yy]
+            for xx in range(max(0, x0), min(w, x1)):
+                row[xx] = 0
 
-    def vline(x0, y0, y1, width=MARK_WIDTH):
-        for xx in range(max(0, x0), min(w, x0 + width)):
-            for yy in range(max(0, y0), min(h, y1)):
-                pix[yy][xx] = 0
+    strip_rows = []
+    band_w = TIC_BAND_CELLS * cell
+    for k, n in enumerate(codes):
+        yc = TOP_MARGIN + k * sector + sector // 2   # strip center = long mark
+        y0 = yc - cell // 2
+        y1 = y0 + cell
+        strip_rows.append((y0, y1))
 
-    def overlaps_strip(x0, x1):
-        return any(not (x1 <= a or x0 >= b) for a, b in strip_ranges)
-
-    # Mobile part, graduated marks: thin radial lines, parallel to the
-    # strips. Medium (5-min) at each sector start, short (1-min) at the
-    # fifths, long (hourly) every SECTORS_PER_LONG sectors.
-    n_sect = (w - left) // sector + 1
-    for k in range(n_sect):
-        xm = left + k * sector
-        vline(xm, top, top + int(MARK_FRAC_MEDIUM * (bot - top)))
-        for j in range(1, 5):
-            xs = xm + j * sector // 5
-            if not overlaps_strip(xs, xs + MARK_WIDTH):
-                vline(xs, top, top + int(MARK_FRAC_SHORT * (bot - top)))
-        if k % SECTORS_PER_LONG == 0:
-            vline(xm, top, bot)
-
-    # Mobile part, code strips: GROUP_CELLS cells stacked along the
-    # radius, one cell wide, next to their 5-min mark.
-    spans = []
-    for idx, n in enumerate(codes):
+        # Code strip: GROUP_CELLS cells side by side along the radius.
         g = gray_from_code(n)
         pattern = [0] * LEAD_CELLS + [1] * MARKER_CELLS + [0] * GAP_CELLS
         pattern += [(g >> (N_BITS - 1 - i)) & 1 for i in range(N_BITS)]
         pattern += [0] * TAIL_CELLS
-        xs = strip_ranges[idx][0]
         for i, dark in enumerate(pattern):
             if dark:
-                for yy in range(i * cell, (i + 1) * cell):
-                    row = pix[top + yy]
-                    for xx in range(xs, xs + cell):
-                        row[xx] = 0
-        spans.append((xs - cell, xs + 2 * cell))
+                hline(y0, band_x0 + i * cell, band_x0 + (i + 1) * cell, cell)
 
-    # Fixed part: one pointer line centered in the FOV (mid-X, where
-    # the decoder looks for the current strip), extending past the
-    # mobile band at both ends. Being MARK_WIDTH-thin it is rejected
-    # by the decoder's strip-width filter when between strips.
-    xp = left + int(POINTER_SECTOR_FRAC * sector)
-    vline(xp, TOP_MARGIN // 2, bot + BOTTOM_MARGIN // 2, POINTER_WIDTH)
+        # Long (5-min) mark at the strip's height, short (1-min) marks
+        # at the fifths below it (until the next strip's mark).
+        hline(yc - MARK_WIDTH // 2, tics_x1 - int(MARK_FRAC_LONG * band_w),
+              tics_x1)
+        for j in range(1, 5):
+            ys = yc + j * sector // 5
+            hline(ys - MARK_WIDTH // 2,
+                  tics_x1 - int(MARK_FRAC_SHORT * band_w), tics_x1)
+
+    # Fixed part: one thin pointer line at mid-height, spanning the FOV
+    # (parallel to the marks; rejected by the decoder's height filter).
+    yp = h // 2
+    hline(yp - POINTER_WIDTH // 2, 0, w, POINTER_WIDTH)
 
     if noise:
         rng = random.Random(seed)
@@ -146,7 +141,7 @@ def render(codes, cell, cal_cell_px, noise=0, seed=1):
                 v = row[xx] + rng.randint(-noise, noise)
                 row[xx] = 0 if v < 0 else (255 if v > 255 else v)
 
-    return pix, w, h, spans, top, bot
+    return pix, w, h, strip_rows, (band_x0, band_x1)
 
 
 # ---- Python mirror of the intended ESP32 decode pipeline (self-check) ----
@@ -183,54 +178,59 @@ def gray_to_binary(g):
     return g & ((1 << N_BITS) - 1)
 
 
-def decode(pix, w, rows, cal_cell_px):
-    """Radial-strip decode: locate the strip's column window, then run
+def decode(pix, w, h, band_cols, cal_cell_px):
+    """Radial-strip decode: locate the strip's row window (coverage per
+    row over the code-band columns, run nearest mid-height), then run
     the 1-D pipeline along the radius. Returns the code index or None."""
-    r0, r1 = rows
-    nrows = r1 - r0
+    x0, x1 = band_cols
+    ncols = x1 - x0
 
     hist = [0] * 256
-    for y in range(r0, r1):
-        for v in pix[y]:
-            hist[v] += 1
-    thr = otsu(hist, nrows * w)
-
-    # Strip columns: dark coverage per column within the band rows.
-    # The marker alone (code 0, no dark data cells) gives 12/27 = 0.44;
-    # thin marks and the pointer are rejected by the width filter.
-    min_cov = 0.40 * nrows
-    min_w = max(1, int(0.7 * cal_cell_px))
-    colcov = [0] * w
-    for y in range(r0, r1):
+    for y in range(h):
         row = pix[y]
-        for x in range(w):
-            if row[x] <= thr:
-                colcov[x] += 1
+        for x in range(x0, x1):
+            hist[row[x]] += 1
+    thr = otsu(hist, ncols * h)
 
-    xs = xe = -1
+    # Strip rows: dark coverage per row within the code band. The
+    # marker alone (code 0, no dark data cells) gives 12/27 = 0.44 of
+    # the strip; the thin pointer line is rejected by the height filter.
+    min_cov = 0.30 * ncols
+    min_h = max(1, int(0.7 * cal_cell_px))
+    rowcov = [0] * h
+    for y in range(h):
+        row = pix[y]
+        c = 0
+        for x in range(x0, x1):
+            if row[x] <= thr:
+                c += 1
+        rowcov[y] = c
+
+    ys = ye = -1
     best_dist = -1
-    cs = -1
-    for x in range(w + 1):
-        good = x < w and colcov[x] >= min_cov
-        if good and cs < 0:
-            cs = x
-        elif not good and cs >= 0:
-            if x - cs >= min_w:
-                dist = abs((cs + x) // 2 - w // 2)
+    rs = -1
+    for y in range(h + 1):
+        good = y < h and rowcov[y] >= min_cov
+        if good and rs < 0:
+            rs = y
+        elif not good and rs >= 0:
+            if y - rs >= min_h:
+                dist = abs((rs + y) // 2 - h // 2)
                 if best_dist < 0 or dist < best_dist:
                     best_dist = dist
-                    xs, xe = cs, x
-            cs = -1
-    if xs < 0:
+                    ys, ye = rs, y
+            rs = -1
+    if ys < 0:
         return None
 
-    # Radial profile across the strip's columns.
+    # Radial profile along the strip's rows.
     prof = []
-    for y in range(r0, r1):
+    sr = ye - ys
+    for x in range(x0, x1):
         acc = 0
-        for x in range(xs, xe):
+        for y in range(ys, ye):
             acc += pix[y][x]
-        prof.append(acc // (xe - xs))
+        prof.append(acc // sr)
 
     hist = [0] * 256
     for v in prof:
@@ -257,11 +257,11 @@ def decode(pix, w, rows, cal_cell_px):
     band_start = best_start + best_w + int(GAP_CELLS * pitch + 0.5)
     gray = 0
     for i in range(N_BITS):
-        y0 = band_start + int(i * pitch + 0.5)
-        y1 = band_start + int((i + 1) * pitch + 0.5)
-        if y0 < 0 or y1 <= y0 or y1 > len(prof):
+        xa = band_start + int(i * pitch + 0.5)
+        xb = band_start + int((i + 1) * pitch + 0.5)
+        if xa < 0 or xb <= xa or xb > len(prof):
             return None
-        avg = sum(prof[y0:y1]) / (y1 - y0)
+        avg = sum(prof[xa:xb]) / (xb - xa)
         if avg <= bit_thr:
             gray |= 1 << (N_BITS - 1 - i)
     return gray_to_binary(gray)
@@ -304,17 +304,17 @@ def main():
         if not 0 <= n < (288 if args.axis == "ha" else 360):
             ap.error("code %d out of range for axis %s" % (n, args.axis))
 
-    pix, w, h, spans, top, bot = render(
+    pix, w, h, strip_rows, band_cols = render(
         args.codes, args.cell, args.cal_cell_px, args.noise, args.seed)
 
-    # The fixed pointer sits at mid-X; the decoder reads the strip
+    # The fixed pointer sits at mid-height; the decoder reads the strip
     # nearest to it. Compute which rendered strip that is.
-    centers = [spans[k][0] + 1.5 * args.cell for k in range(len(args.codes))]
-    mid = w // 2
+    centers = [(y0 + y1) / 2.0 for (y0, y1) in strip_rows]
+    mid = h // 2
     near = min(range(len(centers)), key=lambda k: abs(centers[k] - mid))
 
-    # Self-check 1: full frame decodes to the strip nearest mid-X.
-    got = decode(pix, w, (top, bot), args.cal_cell_px)
+    # Self-check 1: full frame decodes to the strip nearest mid-height.
+    got = decode(pix, w, h, band_cols, args.cal_cell_px)
     ok1 = got == args.codes[near]
     # Self-check 2: with the nearest strip cropped away, the decoder
     # must lock onto the other one (adjacent strips in view).
@@ -323,14 +323,14 @@ def main():
     if len(args.codes) > 1:
         other = 1 - near if len(args.codes) == 2 else (0 if near else 1)
         if centers[near] > centers[other]:
-            cut = spans[near][0]            # nearest strip on the right
-            sub = [row[:cut] for row in pix]
-            w2 = cut
+            cut = strip_rows[near][0]       # nearest strip at the bottom
+            sub = pix[:cut]
+            h2 = cut
         else:
-            cut = spans[near][1]            # nearest strip on the left
-            sub = [row[cut:] for row in pix]
-            w2 = w - cut
-        got2 = decode(sub, w2, (top, bot), args.cal_cell_px)
+            cut = strip_rows[near][1]       # nearest strip at the top
+            sub = pix[cut:]
+            h2 = h - cut
+        got2 = decode(sub, w, h2, band_cols, args.cal_cell_px)
         ok2 = got2 == args.codes[other]
 
     status = "ok" if (ok1 and ok2) else "FAILED"
