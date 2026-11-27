@@ -16,20 +16,23 @@ camera's Y axis, the radial direction is X. The FOV has two parts:
     70% of the band, at each strip's height) and short (1-min, 40%,
     at the fifths between).
 - Fixed part: a single thin pointer line, HORIZONTAL (parallel to the
-  marks), spanning the FOV at a fixed height (mid-FOV here). The fine
-  reading is the pointer height interpolated between graduated lines.
+  marks), at a fixed height (mid-FOV here). It starts at the rim --
+  the marks' anchored right ends -- and extends rightward to the FOV
+  edge; it never crosses the code band. The fine reading is the
+  pointer height interpolated between graduated lines.
 
 The image is written as an 8-bit grayscale BMP (same format as the
 camera's GET /bmp), and every generated image is self-checked by a
 Python mirror of the intended ESP32 decode pipeline for this layout:
 per-row dark coverage over the code-band columns (width-filtered so
-the thin marks/pointer are rejected), strip chosen nearest mid-height
-(where the pointer sits), radial profile along the strip's rows, then
+the thin marks are rejected; the pointer never enters the code band),
+strip chosen nearest mid-height (where the pointer sits), radial
+profile along the strip's rows, then
 Otsu -> widest dark run (12-cell marker) -> guard -> 9 windows -> Gray.
 Two strips in one frame exercise the "adjacent strips in view" case:
 the full-frame decode returns the strip nearest mid-height (the one
-the pointer crosses); with that strip cropped away the decoder must
-lock onto the other one.
+at the pointer's height); with that strip cropped away the decoder
+must lock onto the other one.
 
 Examples:
   python3 make_test_image.py                        # codes 25 and 150
@@ -128,10 +131,11 @@ def render(codes, cell, cal_cell_px, noise=0, seed=1):
             hline(ys - MARK_WIDTH // 2,
                   tics_x1 - int(MARK_FRAC_SHORT * band_w), tics_x1)
 
-    # Fixed part: one thin pointer line at mid-height, spanning the FOV
-    # (parallel to the marks; rejected by the decoder's height filter).
+    # Fixed part: one thin pointer line at mid-height, from the rim
+    # (the marks' anchored right ends) rightward to the FOV edge --
+    # parallel to the marks, and it never crosses the code band.
     yp = h // 2
-    hline(yp - POINTER_WIDTH // 2, 0, w, POINTER_WIDTH)
+    hline(yp - POINTER_WIDTH // 2, tics_x1, w, POINTER_WIDTH)
 
     if noise:
         rng = random.Random(seed)

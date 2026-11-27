@@ -95,8 +95,10 @@
   on the LEFT of the FOV; the graduated marks (1-min short, 5-min
   long, anchored at the rim) sit in a separate band to their RIGHT,
   each long mark at its strip's height. The fixed pointer line runs
-  parallel to the marks (horizontal, full width) at a fixed height
-  near mid-FOV; the decoder reads the strip closest to that height.
+  parallel to the marks (horizontal) at a fixed height near mid-FOV,
+  from the rim (the marks' anchored right ends) to the FOV's right
+  edge -- it never crosses the code band; the decoder reads the strip
+  closest to that height.
 
   CAL_CELL_PX     radial cell pitch in px at 640 columns (VGA-
                   calibrated; scaled by width/640). Max ~21 at VGA,
@@ -104,9 +106,10 @@
   STRIP_COL_*     columns covered by the strips' radial extent
                   (scaled the same way). The coverage scan runs over
                   these columns only, so the graduated marks (in
-                  their own band) never enter it; a thin crossing
-                  pointer line is harmless (rejected by the
-                  run-height filter).
+                  their own band) and the pointer (which only exists
+                  right of the marks' rim) never enter it; the
+                  run-height filter additionally rejects any thin
+                  horizontal artifact.
   CIRCLE_STRIP_FLIP  set to 1 if the data cells read opposite to the
                   painted order (window 0 = MSB = the data cell
                   nearest the marker by default).
@@ -220,10 +223,11 @@ int findWidestDarkRun(const uint8_t* v, int len, uint8_t thr, int* width_out) {
   Decode a radial code strip. The mobile pattern moves vertically in
   the FOV: the camera's Y axis is tangential, X radial. Steps: Otsu
   over the strip columns -> per-row dark coverage -> strip = the
-  height-filtered coverage run closest to mid-FOV height (the fixed
-  pointer line; thin marks live outside the strip columns, and the
-  pointer itself is rejected by the height filter) -> radial profile
-  along the strip's rows -> Otsu + dark/white midpoint -> widest dark
+  height-filtered coverage run closest to mid-FOV height (that is
+  where the fixed pointer sits; the pointer itself stays right of the
+  strip columns, and the height filter rejects any thin horizontal
+  artifact) -> radial profile along the strip's rows -> Otsu +
+  dark/white midpoint -> widest dark
   run (12-cell marker) with the 11..13-cell guard -> 9 Gray windows ->
   binary code.
 */

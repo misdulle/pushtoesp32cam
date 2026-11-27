@@ -42,7 +42,9 @@ radial bands side by side, plus the fixed pointer:
   (5-min, at each strip's height) and short (1-min, at the fifths
   between).
 - Fixed part: a single thin pointer line, HORIZONTAL (parallel to the
-  marks), at a fixed height near mid-FOV. The full accuracy comes from
+  marks), at a fixed height near mid-FOV. It starts at the rim -- the
+  marks' anchored right ends -- and extends rightward to the FOV's
+  edge; it never crosses the code band. The full accuracy comes from
   interpolating the pointer height between the graduated lines; the
   code just identifies the 5-min line it crosses.
 
@@ -311,7 +313,9 @@ marker, 1-cell gap, 9 Gray cells, 3-cell tail) stacked one per 5-min
 line in a LEFT radial band, the graduated marks (long 5-min at each
 strip's height, short 1-min at the fifths, anchored at the rim) sit in
 a separate band to their RIGHT, and the fixed pointer is a single thin
-horizontal line at mid-height -- the fine reading is the pointer
+horizontal line at mid-height, starting at the rim (the marks'
+anchored right ends) and extending rightward to the FOV edge -- it
+never crosses the code band -- the fine reading is the pointer
 height interpolated between graduated lines. Use it as a print/screen
 reference for laying out the real circle bands, or as a decode test
 target:
