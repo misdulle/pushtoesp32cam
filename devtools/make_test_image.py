@@ -5,27 +5,24 @@ The field of view has two parts, as on the real instrument:
 
 - Mobile part (the circle): radial graduated marks -- long (hourly),
   medium (5 min: one code each) and short (1 min) lines -- plus the
-  code band. The codes only put a number on the 5-min medium marks;
-  the code cells are radial stripes like the marks themselves, so the
-  code band runs PARALLEL to the graduated lines, never across them.
+  code strips. Every code strip is a radial band running PARALLEL to
+  the graduated bars: its cells are stacked one after another ALONG
+  the radius ([lead-in][12-cell marker][gap][9 Gray cells][tail]),
+  one cell wide tangentially. The codes only put a number on the
+  5-min medium marks (each strip sits next to its mark).
 - Fixed part: a single black pointer line, drawn at a fixed offset
-  (deliberately between two short marks) -- the fine reading comes
+  (deliberately between the two strips) -- the fine reading comes
   from interpolating the pointer position between graduated lines.
 
-Per code, the band layout the ESP32-CAM decoder expects:
-
-  [2-cell white lead-in][12-cell dark marker][1-cell white gap]
-  [9 Gray data cells, MSB first, dark=1][>=2-cell white gap]
-
-The pointer and the graduated marks stay outside the decoded band rows
-so the row profile is untouched. The image is written as an 8-bit
-grayscale BMP (same format as the camera's GET /bmp), and every
-generated image is self-checked: a Python mirror of the ESP32 decode
-pipeline (row profile -> Otsu -> widest dark run -> guard -> 9 windows
--> Gray) must recover the requested codes before the file is written.
-Two codes side by side also exercise the "adjacent dark runs in view"
-case: the full-strip decode must return the first code, and the strip
-after the first group must yield the second.
+The image is written as an 8-bit grayscale BMP (same format as the
+camera's GET /bmp), and every generated image is self-checked by a
+Python mirror of the intended ESP32 decode pipeline for this layout:
+find the strip's column window (dark coverage per column, width
+filtered so thin marks/pointer are rejected), build the radial
+profile, then Otsu -> widest dark run (12-cell marker) -> guard ->
+9 windows -> Gray. Two strips in one frame exercise the "adjacent
+strips in view" case: the full-frame decode must return the first
+code, the frame cropped after the first strip must yield the second.
 
 Examples:
   python3 make_test_image.py                        # codes 25 and 150
@@ -45,24 +42,20 @@ GAP_CELLS = 1
 LEAD_CELLS = 2
 TAIL_CELLS = 3
 N_BITS = 9
+GROUP_CELLS = LEAD_CELLS + MARKER_CELLS + GAP_CELLS + N_BITS + TAIL_CELLS
 
-# Vertical layout (radial direction is vertical). The pointer line and
-# the graduated marks sit OUTSIDE the decoded band rows.
-TOP_MARGIN = 14
-POINTER_ROWS = 60       # fixed part: single pointer line lives here
-MARKS_GAP = 6           # white gap between pointer region and marks
-MARKS_ROWS = 40         # mobile part: graduated marks (anchored at top)
-MARKS_BAND_GAP = 2
-BAND_ROWS = 40          # matches the calibrated BAND_ROW_START..END width
-BOTTOM_MARGIN = 58
-
-POINTER_X_FRAC = 2.37   # pointer at 2.37 sectors: deliberately between marks
-MARK_LEN_SHORT = 16     # 1-min marks
-MARK_LEN_MEDIUM = 28    # 5-min marks (these carry the codes)
-MARK_LEN_LONG = 40      # hourly marks
+# Geometry: radial direction = vertical (rows). Everything on the mobile
+# part is a radial strip; the fixed pointer is a radial line too.
+TOP_MARGIN = 40
+BOTTOM_MARGIN = 40
+SECTOR_CELLS = 8           # tangential sector pitch (1 code = 5 min)
+STRIP_OFFSET_CELLS = 3     # strip position inside its sector
+POINTER_SECTOR_FRAC = 0.9  # fixed pointer sits between the two strips
 MARK_WIDTH = 3
-SECTOR_MINUTES = 5      # one code per 5-min graduation
-SECTORS_PER_LONG = 12   # hourly long mark (12 x 5 min = 1 h)
+POINTER_WIDTH = 3
+MARK_FRAC_SHORT = 0.4      # 1-min marks: 40% of the radial band
+MARK_FRAC_MEDIUM = 0.7     # 5-min marks (these carry the codes)
+SECTORS_PER_LONG = 12      # hourly long mark (12 x 5 min = 1 h)
 
 
 def gray_from_code(n):
@@ -80,68 +73,67 @@ def code_value(n, axis):
 
 
 def render(codes, cell, cal_cell_px, noise=0, seed=1):
-    """Return (pixels, w, h) of the test strip; pixels = list of rows."""
-    # One code group per 5-min sector: lead+marker+gap+9 data+tail cells.
-    group_cells = LEAD_CELLS + MARKER_CELLS + GAP_CELLS + N_BITS + TAIL_CELLS
+    """Return (pixels, w, h, strip_spans, strip_top, strip_bot)."""
     groups = len(codes)
-    inter_gap = 4 * cell          # white separation between the two groups
-    left_margin = 2 * cell
-    sector_px = group_cells * cell + inter_gap
-    w = left_margin + groups * sector_px + 2 * cell
-    h = (TOP_MARGIN + POINTER_ROWS + MARKS_GAP + MARKS_ROWS +
-         MARKS_BAND_GAP + BAND_ROWS + BOTTOM_MARGIN)
-    marks_top = TOP_MARGIN + POINTER_ROWS + MARKS_GAP
-    band_top = marks_top + MARKS_ROWS + MARKS_BAND_GAP
-    band_bot = band_top + BAND_ROWS
+    sector = SECTOR_CELLS * cell
+    left = 2 * cell
+    w = left + groups * sector + 2 * cell
+    h = TOP_MARGIN + GROUP_CELLS * cell + BOTTOM_MARGIN
+    top = TOP_MARGIN
+    bot = top + GROUP_CELLS * cell
 
     pix = [[255] * w for _ in range(h)]
 
-    # Mobile part, graduated marks: anchored radial lines above the band.
-    # Medium (5-min) marks align with each code group's lead-in; short
-    # 1-min marks subdivide each sector (4 per 5 min); a long mark every
-    # SECTORS_PER_LONG sectors (1 h). All parallel to the code cells.
-    mark_rows = {"s": (marks_top, marks_top + MARK_LEN_SHORT),
-                 "m": (marks_top, marks_top + MARK_LEN_MEDIUM),
-                 "l": (marks_top, marks_top + MARK_LEN_LONG)}
+    strip_ranges = []
+    for k in range(groups):
+        xs = left + k * sector + STRIP_OFFSET_CELLS * cell
+        strip_ranges.append((xs, xs + cell))
 
     def vline(x0, y0, y1, width=MARK_WIDTH):
         for xx in range(max(0, x0), min(w, x0 + width)):
             for yy in range(max(0, y0), min(h, y1)):
                 pix[yy][xx] = 0
 
-    n_sectors = (w - left_margin) // sector_px + 1
-    for k in range(n_sectors):
-        xm = left_margin + k * sector_px
-        vline(xm, *mark_rows["m"])
-        for j in range(1, SECTOR_MINUTES):
-            xs = xm + j * sector_px // SECTOR_MINUTES
-            vline(xs, *mark_rows["s"])
-        if k % SECTORS_PER_LONG == 0:
-            vline(xm, *mark_rows["l"])
+    def overlaps_strip(x0, x1):
+        return any(not (x1 <= a or x0 >= b) for a, b in strip_ranges)
 
-    # Mobile part, code band: radial cells, one group per sector.
-    x = left_margin
-    group_spans = []
-    for n in codes:
+    # Mobile part, graduated marks: thin radial lines, parallel to the
+    # strips. Medium (5-min) at each sector start, short (1-min) at the
+    # fifths, long (hourly) every SECTORS_PER_LONG sectors.
+    n_sect = (w - left) // sector + 1
+    for k in range(n_sect):
+        xm = left + k * sector
+        vline(xm, top, top + int(MARK_FRAC_MEDIUM * (bot - top)))
+        for j in range(1, 5):
+            xs = xm + j * sector // 5
+            if not overlaps_strip(xs, xs + MARK_WIDTH):
+                vline(xs, top, top + int(MARK_FRAC_SHORT * (bot - top)))
+        if k % SECTORS_PER_LONG == 0:
+            vline(xm, top, bot)
+
+    # Mobile part, code strips: GROUP_CELLS cells stacked along the
+    # radius, one cell wide, next to their 5-min mark.
+    spans = []
+    for idx, n in enumerate(codes):
         g = gray_from_code(n)
-        start = x
-        # cells: lead (white), marker (dark), gap (white), data, tail
         pattern = [0] * LEAD_CELLS + [1] * MARKER_CELLS + [0] * GAP_CELLS
         pattern += [(g >> (N_BITS - 1 - i)) & 1 for i in range(N_BITS)]
         pattern += [0] * TAIL_CELLS
+        xs = strip_ranges[idx][0]
         for i, dark in enumerate(pattern):
             if dark:
-                for xx in range(i * cell, (i + 1) * cell):
-                    for yy in range(band_top, band_bot):
-                        pix[yy][start + xx] = 0
-        x += sector_px
-        group_spans.append((start - cell, start + group_cells * cell + cell))
+                for yy in range(i * cell, (i + 1) * cell):
+                    row = pix[top + yy]
+                    for xx in range(xs, xs + cell):
+                        row[xx] = 0
+        spans.append((xs - cell, xs + 2 * cell))
 
-    # Fixed part: a single black pointer line between two short marks
-    # (the fine reading is the pointer's interpolated position relative
-    # to the graduated lines). It stays clear of the band rows.
-    x_ptr = left_margin + int(POINTER_X_FRAC * sector_px)
-    vline(x_ptr, TOP_MARGIN, TOP_MARGIN + POINTER_ROWS)
+    # Fixed part: one pointer line between the strips, extending past
+    # the mobile band at both ends. It stays clear of the strips'
+    # columns, and being MARK_WIDTH-thin it is rejected by the
+    # decoder's strip-width filter anyway.
+    xp = left + int(POINTER_SECTOR_FRAC * sector)
+    vline(xp, TOP_MARGIN // 2, bot + BOTTOM_MARGIN // 2, POINTER_WIDTH)
 
     if noise:
         rng = random.Random(seed)
@@ -151,10 +143,10 @@ def render(codes, cell, cal_cell_px, noise=0, seed=1):
                 v = row[xx] + rng.randint(-noise, noise)
                 row[xx] = 0 if v < 0 else (255 if v > 255 else v)
 
-    return pix, w, h, group_spans, band_top, band_bot
+    return pix, w, h, spans, top, bot
 
 
-# ---- Python mirror of the ESP32 decode pipeline (self-check) -------------
+# ---- Python mirror of the intended ESP32 decode pipeline (self-check) ----
 
 def otsu(hist, total):
     sum_all = float(sum(i * hist[i] for i in range(256)))
@@ -189,12 +181,51 @@ def gray_to_binary(g):
 
 
 def decode(pix, w, rows, cal_cell_px):
-    """Mirror of decodeCircle(): band row profile -> code index, or None."""
-    r_start, r_end = rows
+    """Radial-strip decode: locate the strip's column window, then run
+    the 1-D pipeline along the radius. Returns the code index or None."""
+    r0, r1 = rows
+    nrows = r1 - r0
+
+    hist = [0] * 256
+    for y in range(r0, r1):
+        for v in pix[y]:
+            hist[v] += 1
+    thr = otsu(hist, nrows * w)
+
+    # Strip columns: dark coverage per column within the band rows.
+    # The marker alone (code 0, no dark data cells) gives 12/27 = 0.44;
+    # thin marks and the pointer are rejected by the width filter.
+    min_cov = 0.40 * nrows
+    min_w = max(1, int(0.7 * cal_cell_px))
+    colcov = [0] * w
+    for y in range(r0, r1):
+        row = pix[y]
+        for x in range(w):
+            if row[x] <= thr:
+                colcov[x] += 1
+
+    xs = xe = -1
+    cs = -1
+    for x in range(w + 1):
+        good = x < w and colcov[x] >= min_cov
+        if good and cs < 0:
+            cs = x
+        elif not good and cs >= 0:
+            if x - cs >= min_w:
+                xs, xe = cs, x
+                break
+            cs = -1
+    if xs < 0:
+        return None
+
+    # Radial profile across the strip's columns.
     prof = []
-    for x in range(w):
-        acc = sum(pix[y][x] for y in range(r_start, r_end))
-        prof.append(acc // (r_end - r_start))
+    for y in range(r0, r1):
+        acc = 0
+        for x in range(xs, xe):
+            acc += pix[y][x]
+        prof.append(acc // (xe - xs))
+
     hist = [0] * 256
     for v in prof:
         hist[v] += 1
@@ -220,11 +251,11 @@ def decode(pix, w, rows, cal_cell_px):
     band_start = best_start + best_w + int(GAP_CELLS * pitch + 0.5)
     gray = 0
     for i in range(N_BITS):
-        x0 = band_start + int(i * pitch + 0.5)
-        x1 = band_start + int((i + 1) * pitch + 0.5)
-        if x0 < 0 or x1 <= x0 or x1 > len(prof):
+        y0 = band_start + int(i * pitch + 0.5)
+        y1 = band_start + int((i + 1) * pitch + 0.5)
+        if y0 < 0 or y1 <= y0 or y1 > len(prof):
             return None
-        avg = sum(prof[x0:x1]) / (x1 - x0)
+        avg = sum(prof[y0:y1]) / (y1 - y0)
         if avg <= bit_thr:
             gray |= 1 << (N_BITS - 1 - i)
     return gray_to_binary(gray)
@@ -267,27 +298,28 @@ def main():
         if not 0 <= n < (288 if args.axis == "ha" else 360):
             ap.error("code %d out of range for axis %s" % (n, args.axis))
 
-    pix, w, h, spans, band_top, band_bot = render(
+    pix, w, h, spans, top, bot = render(
         args.codes, args.cell, args.cal_cell_px, args.noise, args.seed)
 
-    # Self-check 1: full strip decodes to the FIRST code (both markers are
-    # equally wide; the decoder keeps the first widest run).
-    got = decode(pix, w, (band_top, band_bot), args.cal_cell_px)
+    # Self-check 1: full frame decodes to the FIRST strip.
+    got = decode(pix, w, (top, bot), args.cal_cell_px)
     ok1 = got == args.codes[0]
-    # Self-check 2: the strip after the first group decodes to the second.
+    # Self-check 2: the frame cropped after the first strip yields the
+    # second (adjacent strips in view).
     ok2 = True
+    got2 = None
     if len(args.codes) > 1:
         cut = spans[0][1]
         sub = [row[cut:] for row in pix]
-        got2 = decode(sub, w - cut, (band_top, band_bot), args.cal_cell_px)
+        got2 = decode(sub, w - cut, (top, bot), args.cal_cell_px)
         ok2 = got2 == args.codes[1]
 
     status = "ok" if (ok1 and ok2) else "FAILED"
     print("image %dx%d, self-check: %s" % (w, h, status))
-    print("  full strip decode  -> %s (want %d) %s"
+    print("  full frame decode -> %s (want %d) %s"
           % (got, args.codes[0], "ok" if ok1 else "FAIL"))
     if len(args.codes) > 1:
-        print("  cropped decode     -> %s (want %d) %s"
+        print("  cropped decode    -> %s (want %d) %s"
               % (got2, args.codes[1], "ok" if ok2 else "FAIL"))
     for n in args.codes:
         print("  code %3d = %s (%s axis)" % (n, code_value(n, args.axis),

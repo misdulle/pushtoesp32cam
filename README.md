@@ -252,16 +252,15 @@ plus the audio push-to guide.
 ## Test band image generator
 
 `devtools/make_test_image.py` renders a synthetic field of view in the
-style of the reference images: a mobile part carrying the graduated
-marks (long hourly, medium 5-min, short 1-min radial lines) and the
-code band -- the code cells are radial stripes parallel to the marks,
-the codes only number the 5-min graduations -- plus the fixed part, a
-single pointer line between two short marks (the fine reading is the
-pointer position interpolated between graduated lines). Per code the
-band is the layout the decoder expects (white lead-in, 12-cell marker,
-1-cell gap, 9 Gray cells, tail gap), and the marks/pointer stay outside
-the decoded band rows. Use it as a print/screen reference for laying
-out the real circle bands, or as a decode test target:
+style of the reference images. Mobile part: graduated marks (long
+hourly, medium 5-min, short 1-min radial lines) and the code strips --
+each strip runs PARALLEL to the marks, its 27 cells stacked along the
+radius (white lead-in, 12-cell marker, 1-cell gap, 9 Gray cells, tail
+gap), one cell wide, next to the 5-min mark it numbers. Fixed part: a
+single pointer line between the strips -- the fine reading is the
+pointer position interpolated between graduated lines. Use it as a
+print/screen reference for laying out the real circle bands, or as a
+decode test target:
 
 ```
 python3 devtools/make_test_image.py --codes 25 150          # HA codes
@@ -271,14 +270,15 @@ python3 devtools/make_test_image.py --codes 0 287 --noise 60  # robustness
 
 Output is an 8-bit grayscale BMP (same format as `GET /bmp`). Every
 image is self-checked before it is written: a Python mirror of the
-ESP32 decode pipeline (row profile -> Otsu -> widest dark run ->
+intended decode pipeline for this layout (locate the strip's column
+window by dark coverage with a width filter that rejects the thin
+marks and the pointer -> radial profile -> Otsu -> widest dark run ->
 11..13-cell guard -> 9 windows -> Gray) must recover the requested
-codes from the strip, including the two-codes-in-view case. Validated:
-all 288 HA + 360 DEC codes decode at +/-40 luma noise. Two codes side
-by side in one frame: a full-frame decode returns the first code (its
-marker wins the widest-dark-run search); crop or frame a single group
-for the second. `example_test_band.bmp` is a pre-generated example
-(codes 25 and 150).
+codes, including the two-strips-in-view case (a full-frame decode
+returns the first strip; the frame cropped after it yields the
+second). Validated: all 288 HA + 360 DEC codes decode at +/-40 luma
+noise. `example_test_band.bmp` is a pre-generated example (codes 25
+and 150).
 
 ## Next steps
 
