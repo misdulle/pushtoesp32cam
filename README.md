@@ -22,11 +22,24 @@ short marks providing sub-cell interpolation.
 
 ## Code band layout (both axes)
 
-One code block in the camera view (left to right):
+One code block in the camera view, cells stacked ALONG THE RADIUS
+(the strip runs PARALLEL to the graduated bars, one cell wide
+tangentially; in the camera frame the radius is Y and the direction
+along the graduated lines is X):
 
 ```
 [white lead-in][marker: 12 dark cells][white gap: 1 cell][9 data cells][white gap]
 ```
+
+The field of view has two parts, as on the real instrument:
+
+- Mobile part (the circle): the graduated marks (long hourly,
+  medium 5-min, short 1-min radial lines) and one code strip next to
+  every 5-min medium mark -- the codes only put a number on that mark.
+- Fixed part: a single pointer line, centered in the camera FOV at
+  mid-X. The full accuracy comes from interpolating the pointer
+  position between the graduated lines; the code just identifies the
+  5-min cell.
 
 - Data cells carry a 9-bit Gray code, MSB first, dark cell = 1.
   - HA axis: 288 codes, each worth 5 min of hour angle (0..287).
@@ -37,15 +50,19 @@ One code block in the camera view (left to right):
 - The gap cell after the marker means consecutive dark cells can never
   touch the marker, so marker width -> cell pitch is exact:
   `pitch_px = marker_width_px / 12`.
-- Decode per frame: average the band rows into a 1-D profile, Otsu
-  threshold, find the widest dark run (the marker), sample 9 fixed
-  windows after the gap, compare each window mean to the midpoint of
+- Decode per frame (camera X tangential, Y radial): Otsu over the
+  strip rows -> dark coverage per column -> the strip is the
+  width-filtered coverage run closest to mid-X (thin marks and the
+  pointer line are rejected by the width filter) -> radial profile
+  over the strip's columns -> Otsu, widest dark run (the marker),
+  9 fixed windows after the gap, each window mean vs the midpoint of
   the dark/white levels, Gray-decode with shifted XORs. No two-width
-  classification, no digit tables, no start/stop matching.
+  classification, no digit tables, no start/stop matching. When two
+  strips are in view the decoder reads the one nearest mid-X.
 
 This was validated by exhaustive simulation of all 288 and 360 codes
 (checkout `esp32cam_circle` tests below): 100% correct decode, clean and
-with +/-40 and +/-80 grey noise per pixel, with adjacent blocks in view
+with +/-40 and +/-80 grey noise per pixel, with adjacent strips in view
 and with partial (cut) markers rejected; wrong-magnification views are
 rejected rather than mis-decoded.
 
@@ -70,8 +87,10 @@ arduino-cli compile --fqbn esp32:esp32:esp32cam \
 3. Set the per-camera `STATIC_IP` (plus gateway/mask) before flashing
    each unit so the two cameras don't collide; empty strings fall back
    to DHCP.
-4. Point the camera squarely at the code band so the band crosses the
-   frame horizontally.
+4. Mount the camera so its long (X) axis is perpendicular to the
+   graduated lines and the code strips stand vertical in the frame
+   (radial, parallel to the marks), with the fixed pointer line at
+   mid-X.
 
 Watching the serial console:
 
@@ -86,20 +105,23 @@ monitor looks like the sketch dies after `boot:0x13`).
 Endpoints:
 
 - `GET /pos` -> `AXIS=HA|DEC`, `CODE=<decoded index>`, `VALUE=<HA hours | DEC degrees>`
-  (HTTP 503 with `ERROR=...` when the band is not read: cut marker,
+  (HTTP 503 with `ERROR=...` when no strip is in view: cut marker,
   out-of-range code, lost focus, camera not ready).
 - `GET /raw` -> just the decoded index, for calibration.
 - `GET /debug` -> diagnostics: camera init result/error code, init
   tries, detected sensor (expect 0x3660 = OV3660, 0x2640 = OV2640),
   PSRAM size/free, free heap, grabbed frame size, WiFi IP/RSSI, and
-  min/max/mean levels over the calibrated band rows (exposure
+  min/max/mean levels over the calibrated strip rows (exposure
   check: dark cells well under ~100, white well over ~180).
 - `GET /jpg` -> the current grayscale frame converted with
   `frame2jpg()` (~15-60 kB, ~0.3 s) - the fast way to aim and focus;
   the sensor stays in grayscale, so `/pos` is unaffected.
 - `GET /bmp` -> the current frame as a full-resolution grayscale BMP
   (~301 kB at VGA, slower to transfer) - pixel-exact inspection.
-- `GET /bench` -> timing: sensor frame wait vs decode time. With
+- `GET /bench` -> timing: sensor frame wait vs decode time (decode is
+  now a two-pass scan of the strip-row region, so `decode_ms` is a few
+  times larger than the old single-profile pass -- expect single-digit
+  milliseconds at SVGA; verify with `/bench`). With
   `?fs=<qqvga|qvga|vga|svga|xga|hd|sxga|uxga>` measures at that size
   (restores the default afterwards; add `&keep=1` to stay there),
   with `?all=1` sweeps the whole ladder. `fps_max` is the continuous
@@ -112,17 +134,28 @@ Endpoints:
 WiFi comes up before the camera is initialized: unless the AP itself
 is down, `/debug` answers even with the camera fully failed. Camera
 buffer: uses PSRAM (VGA) when `psramFound()`, PSRAM-less modules fall
-back to QVGA + DRAM automatically and the decode scales the band
-geometry (VGA-calibrated `CAL_CELL_PX`/`BAND_ROW_*` apply to either).
+back to QVGA + DRAM automatically and the decode scales the strip
+geometry (VGA-calibrated `CAL_CELL_PX`/`STRIP_ROW_*` apply to either).
 
 Calibration knobs at the top of the sketch:
 
-- `CAL_CELL_PX`: expected width of one data cell in pixels at your
-  camera-to-circle distance. The marker-width guard is
-  11..13 x `CAL_CELL_PX`; set this from `/raw` experiments or a photo.
-- `BAND_ROW_START` / `BAND_ROW_END`: rows averaged into the profile;
-  pick rows that cross the band and avoid the circle's graduation ticks
-  for now (fine-reading work will use them deliberately).
+- `CAL_CELL_PX`: expected RADIAL length of one data cell in pixels at
+  480 rows (scaled by the actual frame height). The marker-width guard
+  is 11..13 x `CAL_CELL_PX`; measure the marker's length in pixels on
+  a `/jpg` or `/bmp` and divide by 12. All 27 cells must fit in the
+  frame height, so the ceiling is ~17 px at VGA, ~22 px at SVGA.
+- `STRIP_ROW_START` / `STRIP_ROW_END`: the radial rows the strips
+  occupy (60..420 at 480 rows). Aim so the strips fill this region;
+  the decoder's coverage scan runs over these rows.
+- `CIRCLE_STRIP_FLIP`: set to 1 if the camera's Y axis points the
+  other way along the radius than assumed (data cells read MSB at the
+  strip top by default; check by stepping one code with `/raw` and
+  seeing whether the value increments or wraps backwards).
+- Camera orientation: X (the 800 px dimension at SVGA) is tangential
+  -- perpendicular to the graduated lines, spanning as many of them as
+  possible; Y is radial. The fixed pointer line must sit at mid-X, and
+  the decoder reports the strip nearest to it (`/pos` returns 503 when
+  no strip is in view).
 - Exposure/gain are fixed in `setup()`: AEC/AGC off, manual exposure
   via `s->set_aec_value(s, 300)` (OV2640 range 0..1200). With the
   studio lights the levels must sit far apart (dark well under ~100,
@@ -130,8 +163,8 @@ Calibration knobs at the top of the sketch:
   still decodes.
 
 The sketch intentionally serves fresh captures on request (no streaming).
-Averages over the band rows give roughly log2(rows) bits of noise
-immunity per pixel.
+Averaging over the strip's columns gives roughly log2(cols) bits of
+noise immunity per pixel.
 
 ## Host console
 
@@ -257,8 +290,9 @@ hourly, medium 5-min, short 1-min radial lines) and the code strips --
 each strip runs PARALLEL to the marks, its 27 cells stacked along the
 radius (white lead-in, 12-cell marker, 1-cell gap, 9 Gray cells, tail
 gap), one cell wide, next to the 5-min mark it numbers. Fixed part: a
-single pointer line between the strips -- the fine reading is the
-pointer position interpolated between graduated lines. Use it as a
+single pointer line centered at mid-X, extending past the mobile band
+-- the fine reading is the pointer position interpolated between
+graduated lines. Use it as a
 print/screen reference for laying out the real circle bands, or as a
 decode test target:
 
@@ -272,13 +306,15 @@ Output is an 8-bit grayscale BMP (same format as `GET /bmp`). Every
 image is self-checked before it is written: a Python mirror of the
 intended decode pipeline for this layout (locate the strip's column
 window by dark coverage with a width filter that rejects the thin
-marks and the pointer -> radial profile -> Otsu -> widest dark run ->
-11..13-cell guard -> 9 windows -> Gray) must recover the requested
-codes, including the two-strips-in-view case (a full-frame decode
-returns the first strip; the frame cropped after it yields the
-second). Validated: all 288 HA + 360 DEC codes decode at +/-40 luma
-noise. `example_test_band.bmp` is a pre-generated example (codes 25
-and 150).
+marks and the pointer, strip chosen nearest mid-X -> radial profile ->
+Otsu -> widest dark run -> 11..13-cell guard -> 9 windows -> Gray)
+must recover the requested codes, including the two-strips-in-view
+case (the full-frame decode returns the strip nearest mid-X, where
+the pointer is drawn; with that strip cropped away the decoder must
+lock onto the other one). Validated: all 288 HA + 360 DEC codes
+decode at +/-40 luma noise, plus 120 random two-strip frames.
+`example_test_band.bmp` is a pre-generated example (codes 25 and
+150; the full-frame decode returns 150, the strip under the pointer).
 
 ## Next steps
 

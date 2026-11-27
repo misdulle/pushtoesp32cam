@@ -84,9 +84,31 @@
 
 #define MARKER_CELLS 12
 #define GAP_CELLS 1
-#define CAL_CELL_PX 12
-#define BAND_ROW_START 220
-#define BAND_ROW_END 260
+/*
+  Geometry for radial code strips (parallel to the graduated bars):
+  the camera's X axis is TANGENTIAL (spans as many graduated lines as
+  possible), Y is radial. A code strip is 27 cells stacked along Y
+  ([2 lead][12 marker][1 gap][9 Gray, MSB at strip top][3 tail]), one
+  cell wide in X. The fixed pointer line sits at mid-X; the decoder
+  reads the strip whose columns are closest to mid-X.
+
+  CAL_CELL_PX     radial cell length in px at 480 rows (VGA-calibrated;
+                  scaled by height/480). Max ~17 at VGA, ~22 at SVGA
+                  (27 cells must fit the frame height).
+  STRIP_ROW_*     rows covered by the strips' radial extent (scaled the
+                  same way); the Otsu/coverage analysis runs there, so
+                  the pointer line and anything outside must be kept
+                  out or expected to merge (a thin crossing pointer is
+                  harmless: it only dilutes levels uniformly).
+  CIRCLE_STRIP_FLIP  set to 1 if the camera's Y axis points opposite
+                  to the painted strips (code reads reversed).
+*/
+#define CAL_CELL_PX 15
+#define STRIP_ROW_START 60
+#define STRIP_ROW_END 420
+#ifndef CIRCLE_STRIP_FLIP
+#define CIRCLE_STRIP_FLIP 0
+#endif
 
 const char* WIFI_SSID = "your-ssid";
 const char* WIFI_PASS = "your-password";
@@ -140,7 +162,7 @@ uint16_t grayToBinary(uint16_t g) {
   return b & ((1 << N_BITS) - 1);
 }
 
-int otsuThreshold(const uint8_t* hist, int total) {
+int otsuThreshold(const uint32_t* hist, int total) {
   float sum = 0.0f;
   for (int i = 0; i < 256; i++) sum += (float)i * hist[i];
   float sumB = 0.0f;
@@ -186,32 +208,104 @@ int findWidestDarkRun(const uint8_t* v, int len, uint8_t thr, int* width_out) {
   return bestStart;
 }
 
+/*
+  Decode a radial code strip. The camera's X axis is tangential (spans
+  the graduated lines), Y radial. Steps: Otsu over the strip rows ->
+  per-column dark coverage -> strip = the width-filtered coverage run
+  closest to mid-X (the fixed pointer line; thin marks and the pointer
+  itself are rejected by the width filter) -> radial profile over the
+  strip's columns -> Otsu + dark/white midpoint -> widest dark run
+  (12-cell marker) with the 11..13-cell guard -> 9 Gray windows ->
+  binary code.
+*/
 bool decodeFb(camera_fb_t* fb, int* code_out) {
   int w = fb->width;
-  int rStart = (int)(BAND_ROW_START * fb->height / 480.0f + 0.5f);
-  int rEnd = (int)(BAND_ROW_END * fb->height / 480.0f + 0.5f);
+  int rStart = (int)(STRIP_ROW_START * fb->height / 480.0f + 0.5f);
+  int rEnd = (int)(STRIP_ROW_END * fb->height / 480.0f + 0.5f);
   int rows = rEnd - rStart;
   if (rStart < 0 || rows <= 0 || rEnd > (int)fb->height ||
           fb->len < (size_t)(rEnd * w)) {
     esp_camera_fb_return(fb);
     return false;
   }
+  /*
+    Geometry is calibrated for VGA (CAL_CELL_PX at 480 rows); scale
+    with the frame height (the radial direction is Y). PSRAM-less
+    modules get QVGA so the grayscale framebuffer fits in DRAM.
+  */
+  int cellPx = (int)(CAL_CELL_PX * fb->height / 480.0f + 0.5f);
+  if (cellPx < 1) cellPx = 1;
 
-  static uint8_t prof[1600];
-  static uint8_t hist[256];
+  /* uint32_t bins: a strip region can hold >65535 pixels of one level. */
+  static uint32_t hist[256];
+  static uint16_t colcov[1600];
+  static uint8_t prof[1200];
   memset(hist, 0, sizeof(hist));
-  int maxCols = (w < (int)sizeof(prof)) ? w : (int)sizeof(prof);
+  memset(colcov, 0, sizeof(uint16_t) * w);
 
-  for (int x = 0; x < maxCols; x++) {
-    unsigned long acc = 0;
-    const uint8_t* line = fb->buf + (size_t)rStart * w + x;
-    for (int y = 0; y < rows; y++) acc += line[(size_t)y * w];
-    uint8_t v = (uint8_t)(acc / rows);
-    prof[x] = v;
-    hist[v]++;
+  /* Pass 1: level histogram over the strip rows -> global threshold. */
+  for (int y = rStart; y < rEnd; y++) {
+    const uint8_t* line = fb->buf + (size_t)y * w;
+    for (int x = 0; x < w; x++) hist[line[x]]++;
+  }
+  int thr = otsuThreshold(hist, rows * w);
+
+  /* Pass 2: dark coverage per column within the strip rows. */
+  for (int y = rStart; y < rEnd; y++) {
+    const uint8_t* line = fb->buf + (size_t)y * w;
+    for (int x = 0; x < w; x++) {
+      if (line[x] <= thr) colcov[x]++;
+    }
   }
 
-  int thr = otsuThreshold(hist, maxCols);
+  /*
+    Strip columns: coverage runs of at least 40% of the rows (the
+    marker alone gives 12/27 = 0.44) and at least 0.7 cells wide
+    (thin graduated marks and the pointer line are narrower). Of the
+    qualifying runs take the one closest to mid-X -- the fixed pointer
+    selects the current strip.
+  */
+  int minCov = (int)(0.40f * rows);
+  int minWidth = (int)(0.7f * cellPx);
+  if (minWidth < 1) minWidth = 1;
+  int stripX0 = -1, stripX1 = -1;
+  long bestDist = -1;
+  int cs = -1;
+  for (int x = 0; x <= w; x++) {
+    bool good = (x < w) && (colcov[x] >= minCov);
+    if (good && cs < 0) {
+      cs = x;
+    } else if (!good && cs >= 0) {
+      if (x - cs >= minWidth) {
+        long dist = (long)(cs + x) / 2 - w / 2;
+        if (dist < 0) dist = -dist;
+        if (bestDist < 0 || dist < bestDist) {
+          bestDist = dist;
+          stripX0 = cs;
+          stripX1 = x;
+        }
+      }
+      cs = -1;
+    }
+  }
+  if (stripX0 < 0) {
+    esp_camera_fb_return(fb);
+    return false;
+  }
+
+  /* Radial profile across the strip's columns. */
+  int profLen = rEnd - rStart;
+  int sc = stripX1 - stripX0;
+  for (int y = 0; y < profLen; y++) {
+    const uint8_t* line = fb->buf + (size_t)(rStart + y) * w + stripX0;
+    unsigned long acc = 0;
+    for (int x = 0; x < sc; x++) acc += line[x];
+    prof[y] = (uint8_t)(acc / sc);
+  }
+
+  memset(hist, 0, sizeof(hist));
+  for (int y = 0; y < profLen; y++) hist[prof[y]]++;
+  thr = otsuThreshold(hist, profLen);
 
   float darkSum = 0.0f;
   long darkCnt = 0;
@@ -233,14 +327,7 @@ bool decodeFb(camera_fb_t* fb, int* code_out) {
   }
 
   int markerW = 0;
-  int markerStart = findWidestDarkRun(prof, maxCols, thr, &markerW);
-  /*
-    Geometry is calibrated for VGA (CAL_CELL_PX at 640 px width);
-    scale if the camera fell back to a smaller frame (PSRAM-less
-    modules get QVGA so the grayscale framebuffer fits in DRAM).
-  */
-  int cellPx = (int)(CAL_CELL_PX * fb->width / 640.0f + 0.5f);
-  if (cellPx < 1) cellPx = 1;
+  int markerStart = findWidestDarkRun(prof, profLen, thr, &markerW);
   if (markerStart < 0 || markerW < 11 * cellPx || markerW > 13 * cellPx) {
     esp_camera_fb_return(fb);
     return false;
@@ -250,16 +337,22 @@ bool decodeFb(camera_fb_t* fb, int* code_out) {
   uint16_t gray = 0;
   int bandStart = markerStart + markerW + (int)(GAP_CELLS * pitch + 0.5f);
   for (int i = 0; i < N_BITS; i++) {
-    int x0 = bandStart + (int)(i * pitch + 0.5f);
-    int x1 = bandStart + (int)((i + 1) * pitch + 0.5f);
-    if (x0 < 0 || x1 <= x0 || x1 > maxCols) {
+    int y0 = bandStart + (int)(i * pitch + 0.5f);
+    int y1 = bandStart + (int)((i + 1) * pitch + 0.5f);
+    if (y0 < 0 || y1 <= y0 || y1 > profLen) {
       esp_camera_fb_return(fb);
       return false;
     }
     unsigned long acc = 0;
-    for (int dx = x0; dx < x1; dx++) acc += prof[dx];
-    float avg = (float)acc / (x1 - x0);
-    if (avg <= bitThr) gray |= (1 << (N_BITS - 1 - i));
+    for (int dy = y0; dy < y1; dy++) acc += prof[dy];
+    float avg = (float)acc / (y1 - y0);
+    if (avg <= bitThr) {
+#if CIRCLE_STRIP_FLIP
+      gray |= (1 << i);
+#else
+      gray |= (1 << (N_BITS - 1 - i));
+#endif
+    }
   }
 
   esp_camera_fb_return(fb);
@@ -427,8 +520,8 @@ void handleDebug() {
              " len=" + String(d->len) + "\n";
       /* Level statistics over the calibrated band rows. */
       int bw = d->width;
-      int rs = (int)(BAND_ROW_START * d->height / 480.0f + 0.5f);
-      int re = (int)(BAND_ROW_END * d->height / 480.0f + 0.5f);
+      int rs = (int)(STRIP_ROW_START * d->height / 480.0f + 0.5f);
+      int re = (int)(STRIP_ROW_END * d->height / 480.0f + 0.5f);
       if (rs < 0) rs = 0;
       if (re > (int)d->height) re = d->height;
       if (re > rs && d->len >= (size_t)(re * bw)) {

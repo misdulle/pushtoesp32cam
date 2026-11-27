@@ -10,19 +10,22 @@ The field of view has two parts, as on the real instrument:
   the radius ([lead-in][12-cell marker][gap][9 Gray cells][tail]),
   one cell wide tangentially. The codes only put a number on the
   5-min medium marks (each strip sits next to its mark).
-- Fixed part: a single black pointer line, drawn at a fixed offset
-  (deliberately between the two strips) -- the fine reading comes
-  from interpolating the pointer position between graduated lines.
+- Fixed part: a single black pointer line, drawn centered in the FOV
+  at mid-X (the decoder reads the strip nearest to it) -- the fine
+  reading comes from interpolating the pointer position between
+  graduated lines.
 
 The image is written as an 8-bit grayscale BMP (same format as the
 camera's GET /bmp), and every generated image is self-checked by a
 Python mirror of the intended ESP32 decode pipeline for this layout:
 find the strip's column window (dark coverage per column, width
-filtered so thin marks/pointer are rejected), build the radial
+filtered so thin marks/pointer are rejected, strip chosen nearest
+the FOV mid-line where the fixed pointer sits), build the radial
 profile, then Otsu -> widest dark run (12-cell marker) -> guard ->
 9 windows -> Gray. Two strips in one frame exercise the "adjacent
-strips in view" case: the full-frame decode must return the first
-code, the frame cropped after the first strip must yield the second.
+strips in view" case: the full-frame decode returns the strip
+nearest mid-X (where the pointer is drawn); with that strip
+cropped away the decoder must lock onto the other one.
 
 Examples:
   python3 make_test_image.py                        # codes 25 and 150
@@ -50,7 +53,7 @@ TOP_MARGIN = 40
 BOTTOM_MARGIN = 40
 SECTOR_CELLS = 8           # tangential sector pitch (1 code = 5 min)
 STRIP_OFFSET_CELLS = 3     # strip position inside its sector
-POINTER_SECTOR_FRAC = 0.9  # fixed pointer sits between the two strips
+POINTER_SECTOR_FRAC = 1.0  # fixed pointer: centered in the FOV (mid-X)
 MARK_WIDTH = 3
 POINTER_WIDTH = 3
 MARK_FRAC_SHORT = 0.4      # 1-min marks: 40% of the radial band
@@ -128,10 +131,10 @@ def render(codes, cell, cal_cell_px, noise=0, seed=1):
                         row[xx] = 0
         spans.append((xs - cell, xs + 2 * cell))
 
-    # Fixed part: one pointer line between the strips, extending past
-    # the mobile band at both ends. It stays clear of the strips'
-    # columns, and being MARK_WIDTH-thin it is rejected by the
-    # decoder's strip-width filter anyway.
+    # Fixed part: one pointer line centered in the FOV (mid-X, where
+    # the decoder looks for the current strip), extending past the
+    # mobile band at both ends. Being MARK_WIDTH-thin it is rejected
+    # by the decoder's strip-width filter when between strips.
     xp = left + int(POINTER_SECTOR_FRAC * sector)
     vline(xp, TOP_MARGIN // 2, bot + BOTTOM_MARGIN // 2, POINTER_WIDTH)
 
@@ -205,6 +208,7 @@ def decode(pix, w, rows, cal_cell_px):
                 colcov[x] += 1
 
     xs = xe = -1
+    best_dist = -1
     cs = -1
     for x in range(w + 1):
         good = x < w and colcov[x] >= min_cov
@@ -212,8 +216,10 @@ def decode(pix, w, rows, cal_cell_px):
             cs = x
         elif not good and cs >= 0:
             if x - cs >= min_w:
-                xs, xe = cs, x
-                break
+                dist = abs((cs + x) // 2 - w // 2)
+                if best_dist < 0 or dist < best_dist:
+                    best_dist = dist
+                    xs, xe = cs, x
             cs = -1
     if xs < 0:
         return None
@@ -301,26 +307,39 @@ def main():
     pix, w, h, spans, top, bot = render(
         args.codes, args.cell, args.cal_cell_px, args.noise, args.seed)
 
-    # Self-check 1: full frame decodes to the FIRST strip.
+    # The fixed pointer sits at mid-X; the decoder reads the strip
+    # nearest to it. Compute which rendered strip that is.
+    centers = [spans[k][0] + 1.5 * args.cell for k in range(len(args.codes))]
+    mid = w // 2
+    near = min(range(len(centers)), key=lambda k: abs(centers[k] - mid))
+
+    # Self-check 1: full frame decodes to the strip nearest mid-X.
     got = decode(pix, w, (top, bot), args.cal_cell_px)
-    ok1 = got == args.codes[0]
-    # Self-check 2: the frame cropped after the first strip yields the
-    # second (adjacent strips in view).
+    ok1 = got == args.codes[near]
+    # Self-check 2: with the nearest strip cropped away, the decoder
+    # must lock onto the other one (adjacent strips in view).
     ok2 = True
     got2 = None
     if len(args.codes) > 1:
-        cut = spans[0][1]
-        sub = [row[cut:] for row in pix]
-        got2 = decode(sub, w - cut, (top, bot), args.cal_cell_px)
-        ok2 = got2 == args.codes[1]
+        other = 1 - near if len(args.codes) == 2 else (0 if near else 1)
+        if centers[near] > centers[other]:
+            cut = spans[near][0]            # nearest strip on the right
+            sub = [row[:cut] for row in pix]
+            w2 = cut
+        else:
+            cut = spans[near][1]            # nearest strip on the left
+            sub = [row[cut:] for row in pix]
+            w2 = w - cut
+        got2 = decode(sub, w2, (top, bot), args.cal_cell_px)
+        ok2 = got2 == args.codes[other]
 
     status = "ok" if (ok1 and ok2) else "FAILED"
     print("image %dx%d, self-check: %s" % (w, h, status))
-    print("  full frame decode -> %s (want %d) %s"
-          % (got, args.codes[0], "ok" if ok1 else "FAIL"))
+    print("  full frame decode -> %s (strip %d, want %d) %s"
+          % (got, near, args.codes[near], "ok" if ok1 else "FAIL"))
     if len(args.codes) > 1:
-        print("  cropped decode    -> %s (want %d) %s"
-              % (got2, args.codes[1], "ok" if ok2 else "FAIL"))
+        print("  cropped decode    -> %s (strip %d, want %d) %s"
+              % (got2, other, args.codes[other], "ok" if ok2 else "FAIL"))
     for n in args.codes:
         print("  code %3d = %s (%s axis)" % (n, code_value(n, args.axis),
                                               args.axis.upper()))
