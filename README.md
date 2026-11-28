@@ -370,11 +370,62 @@ noise 0/20/40, both decodes per frame = 240/240 checks).
 150; the full-frame decode returns 25, the strip under the pointer,
 and 150 after that strip is cropped away).
 
+## Printable code strips
+
+`devtools/make_code_strips_svg.py` generates the code-band artwork as
+A4 sheets, modelled on the i25 strip sheet: the codes are printed on
+~20 long strips to glue around the circle instead of 288 individual
+blocks. Two variants are committed:
+
+- `devtools/ha_code_strips_0.5265mm.svg` - the geometry.svg cell
+  (0.5265 mm; 27 cells = 14.21 mm), for the camera parallel to the
+  graduations.
+- `devtools/ha_code_strips_0.4000mm.svg` - the compact cell (0.40 mm;
+  27 cells = 10.80 mm), for the rotated camera (Xcam perpendicular to
+  the graduations), which allows a closer camera (~15-20 mm) and more
+  pixels per 5-min pitch.
+
+Both hold 20 strips (10 columns x 2 page rows) covering all 288 HA
+codes (8 strips of 15 codes, 12 of 14). Regenerate or retune:
+
+```
+python3 devtools/make_code_strips_svg.py                     # std cell
+python3 devtools/make_code_strips_svg.py --cell-mm 0.40      # compact
+python3 devtools/make_code_strips_svg.py --axis dec --strips 30
+```
+
+Strip anatomy (radial direction): [1.5 mm inner margin][2-cell
+lead-in + 12-cell marker + 1-cell gap + 9 Gray cells + 3-cell tail][0.5
+mm outer margin]. The marker end is the INNER end (toward the circle
+centre); an IN arrow on the label tab points to it. Lengthwise a strip
+is exactly n x 7.4 mm with row centres at (k + 1/2) x 7.4 mm, so
+butt-joined strips keep the exact standard pitch across the joints.
+
+Printing and gluing:
+
+1. Print at 100 % scale (no fit-to-page) and verify the 74 mm check
+   bar on each sheet (10 code pitches) with a ruler.
+2. Cut the strips apart along the printed cut lines, and cut off the
+   6 mm label tabs (strip number + code range) before gluing.
+3. Butt-join the strips end to end around the circle, marker end
+   (IN arrow) toward the centre. The 0.5 mm outer margin must stay
+   clear of the existing graduation marks; the 0.7 mm centre ticks in
+   the margins align each code row with its 5-min graduation line.
+4. When a strip is too long for one piece, cut it mid-pattern between
+   two code rows only - the row-centre pitch survives any joint.
+
+Every generated sheet is self-checked: the dark-cell runs are compared
+against the reference 27-cell pattern for all codes, all intra-strip
+pitches are verified to exactly 7.4 mm, and a full raster decode (the
+`make_test_image.py` pipeline at 19 px/cell) recovers every one of the
+288 rows with zero failures.
+
 ## Next steps
 
 - Fine reading: overlay detection of the original long/short
   graduation marks inside the code cell currently under the crosshair,
   weighted centroid -> sub-cell interpolation (5 min -> arcseconds-ish).
-- Band artwork generator (SVG/PDF at ring radius, one marker + 9 cells
-  per block, 288/360 blocks) is a natural companion script.
+- Band artwork generator for the code band: done
+  (`make_code_strips_svg.py`, see "Printable code strips"); the
+  graduation-mark band is the existing instrument artwork.
 - Optional: ESP32-CAM soft-AP fallback and NTP on the host side.
