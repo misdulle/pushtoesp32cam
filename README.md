@@ -20,69 +20,199 @@ short marks providing sub-cell interpolation.
         +--------------------------------------------------------------+
 ```
 
-## Code band layout (both axes)
+## Field-of-view layout (both axes)
 
-One code block in the camera view (left to right):
+Standard scale reference (geometry.svg): the spacing between 5-min
+graduations is **7.4 mm** on the HA circle; one code cell is then
+0.5265 mm (27 cells = 14.2 mm). Porting to DEC changes only the scale
+reference (the DEC circle's 0.5 deg code spacing in mm) and the code
+count (360 instead of 288); the 9-bit code serves both.
+
+As on the real instrument: the mobile part (the graduated circle)
+moves VERTICALLY through the camera FOV -- the tangential direction is
+the camera's Y axis, the radial direction is X. The graduated marks
+and the code strips are horizontal bands, and the code cells are laid
+out ALONG THE RADIUS (left to right in the frame). Each code strip is
 
 ```
-[white lead-in][marker: 12 dark cells][white gap: 1 cell][9 data cells][white gap]
+[2-cell white lead-in][marker: 12 dark cells][white gap: 1 cell][9 data cells][3-cell white tail]
 ```
 
-- Data cells carry a 9-bit Gray code, MSB first, dark cell = 1.
+27 cells wide (along X = 14.2 mm), 2.0 mm tall (along Y, centered on
+its 5-min mark; one strip per 7.4 mm). The FOV has two radial bands
+side by side, plus the fixed pointer (all from geometry.svg):
+
+| element | radial (X) size | notes |
+|---|---|---|
+| code strip (27 cells) | 14.215 mm | 0.5265 mm/cell, centered on its 5-min mark |
+| code zone | 16.13 mm | strip inset 1.43 mm from its inner edge |
+| gap | 0.60 mm | pattern end to graduation zone |
+| graduation zone | 4.93 mm | 5-min marks span it (4.85 mm), 1-min marks 58% (2.84 mm) |
+| pointer zone (static) | 4.56 mm | pointer starts at the rim |
+| **FOV radial total** | **25.7 mm** | mobile 21.2 + pointer 4.6 |
+
+Tangentially the FOV covers ~2.4 sectors (18 mm at the sketch scale).
+The 1-min marks sit at the fifths between consecutive 5-min marks
+(exactly 1.48 mm apart).
+
+- LEFT radial band: the code strips. They stack vertically, one per
+  5-min graduation, each ALIGNED with its long (5-min) mark: same
+  height -- the codes only put a number on that mark.
+- RIGHT radial band: the graduated marks, anchored at the rim: long
+  (5-min, at each strip's height) and short (1-min, at the fifths
+  between).
+- Fixed part: a single thin pointer line, HORIZONTAL (parallel to the
+  marks), at a fixed height near mid-FOV. It starts at the rim -- the
+  marks' anchored right ends -- and extends rightward to the FOV's
+  edge; it never crosses the code band. The full accuracy comes from
+  interpolating the pointer height between the graduated lines; the
+  code just identifies the 5-min line it crosses.
+
+- Data cells carry a 9-bit Gray code, MSB first (the MSB data cell is
+  the one nearest the marker, i.e. the strip's left/inner end), dark
+  cell = 1.
   - HA axis: 288 codes, each worth 5 min of hour angle (0..287).
   - DEC axis: 360 codes, each worth 0.5 deg, code 0 = -90 deg (0..359).
 - The marker is 12 cells of dark so it is always the widest dark run:
   the longest possible *merged* dark data run is 9 cells (all-ones),
-  and the 1-cell gaps keep the marker from merging with dark data.
+  and the 1-cell gap keeps the marker from merging with dark data.
 - The gap cell after the marker means consecutive dark cells can never
-  touch the marker, so marker width -> cell pitch is exact:
-  `pitch_px = marker_width_px / 12`.
-- Decode per frame: average the band rows into a 1-D profile, Otsu
-  threshold, find the widest dark run (the marker), sample 9 fixed
-  windows after the gap, compare each window mean to the midpoint of
-  the dark/white levels, Gray-decode with shifted XORs. No two-width
-  classification, no digit tables, no start/stop matching.
+  touch the marker, so marker length -> cell pitch is exact:
+  `pitch_px = marker_length_px / 12` (measured along X).
+- Decode per frame (radial = X, tangential = Y): Otsu over the strip
+  columns -> dark coverage per row over those columns -> the strip is
+  the coverage run with >=30% of the columns dark and a height of at
+  least 0.7 cells (thin marks and the pointer line are rejected), the
+  run CLOSEST TO MID-FOV HEIGHT is chosen (that is where the pointer
+  sits) -> radial profile averaged over the strip's rows -> Otsu,
+  widest dark run along X (the marker), 11..13-cell guard, 9 fixed
+  windows after the gap, each window mean vs the midpoint of the
+  dark/white levels, Gray-decode with shifted XORs. No two-width
+  classification, no digit tables, no start/stop matching. When two
+  strips are in view the decoder reads the one nearest mid-height; if
+  none is in view, `/pos` answers 503.
 
 This was validated by exhaustive simulation of all 288 and 360 codes
 (checkout `esp32cam_circle` tests below): 100% correct decode, clean and
-with +/-40 and +/-80 grey noise per pixel, with adjacent blocks in view
+with +/-40 and +/-80 grey noise per pixel, with adjacent strips in view
 and with partial (cut) markers rejected; wrong-magnification views are
 rejected rather than mis-decoded.
 
 ## ESP32-CAM sketch
 
 `esp32cam_circle/esp32cam_circle.ino`, AI-Thinker ESP32-CAM, Arduino IDE
-or arduino-cli with the esp32 core.
+or arduino-cli with the esp32 core. Verified to compile with
+arduino-cli 1.6.0 against esp32 core 4.0.0 (defaults: 34% flash, 19%
+RAM):
+
+```
+arduino-cli core install esp32:esp32
+arduino-cli compile --fqbn esp32:esp32:esp32cam esp32cam_circle          # HA camera
+arduino-cli compile --fqbn esp32:esp32:esp32cam \
+    --build-property "compiler.cpp.extra_flags=-DCIRCLE_AXIS=1" \
+    esp32cam_circle                                                       # DEC camera
+```
 
 1. Set `WIFI_SSID` / `WIFI_PASS`.
-2. Set `CIRCLE_AXIS` to `AXIS_HA` for the hour-angle circle reader,
-   `AXIS_DEC` for the declination circle reader; flash the identical
-   sketch to both cameras.
-3. Point the camera squarely at the code band so the band crosses the
-   frame horizontally.
+2. Pick the axis by editing `CIRCLE_AXIS`, or leave the file as-is and
+   use the `-DCIRCLE_AXIS=1` override above for the DEC camera.
+3. Set the per-camera `STATIC_IP` (plus gateway/mask) before flashing
+   each unit so the two cameras don't collide; empty strings fall back
+   to DHCP.
+4. Mount the camera so its long (X) axis runs ALONG the radius
+   (perpendicular to the graduated lines, which are horizontal), with
+   the code strips as horizontal bands in the LEFT of the frame, the
+   graduated marks to their RIGHT, and the fixed pointer line at
+   mid-height. The mobile circle part then moves VERTICALLY through
+   the FOV as the telescope slews. For the geometry.svg FOV (25.7 mm
+   radial x 18 mm tangential) the lens sits ~25-33 mm from the circle
+   with the stock ~3.5 mm lens (OV3660 active area 2.867 x 2.150 mm;
+   SVGA windows the full array). Measure the true px/mm empirically:
+   put a ruler in the scene, grab `/jpg`, read mm per pixel.
+
+Watching the serial console:
+
+```
+arduino-cli monitor -p /dev/ttyUSB2 -c baudrate=115200,dtr=off,rts=off
+```
+
+`dtr=off,rts=off` is important: the default DTR/RTS assert on attach
+can reset the board mid-boot, truncating the ROM output (a plain
+monitor looks like the sketch dies after `boot:0x13`).
 
 Endpoints:
 
 - `GET /pos` -> `AXIS=HA|DEC`, `CODE=<decoded index>`, `VALUE=<HA hours | DEC degrees>`
-  (HTTP 503 with `ERROR=...` when the band is not read: cut marker,
-  out-of-range code, lost focus).
+  (HTTP 503 with `ERROR=...` when no strip is in view: cut marker,
+  out-of-range code, lost focus, camera not ready).
 - `GET /raw` -> just the decoded index, for calibration.
+- `GET /debug` -> diagnostics: camera init result/error code, init
+  tries, detected sensor (expect 0x3660 = OV3660, 0x2640 = OV2640),
+  PSRAM size/free, free heap, grabbed frame size, WiFi IP/RSSI, and
+  min/max/mean levels over the calibrated strip rows (exposure
+  check: dark cells well under ~100, white well over ~180).
+- `GET /jpg` -> the current grayscale frame converted with
+  `frame2jpg()` (~15-60 kB, ~0.3 s) - the fast way to aim and focus;
+  the sensor stays in grayscale, so `/pos` is unaffected.
+- `GET /bmp` -> the current frame as a full-resolution grayscale BMP
+  (~301 kB at VGA, slower to transfer) - pixel-exact inspection.
+- `GET /bench` -> timing: sensor frame wait vs decode time (decode is
+  a two-pass scan of the strip-column region, so `decode_ms` is a few
+  times larger than the old single-profile pass -- expect single-digit
+  milliseconds at SVGA; verify with `/bench`). With
+  `?fs=<qqvga|qvga|vga|svga|xga|hd|sxga|uxga>` measures at that size
+  (restores the default afterwards; add `&keep=1` to stay there),
+  with `?all=1` sweeps the whole ladder. `fps_max` is the continuous
+  rate; the working default is SVGA (800x600, ~5.6 fps measured on the
+  OV3660 - the biggest image meeting the 5 fps target).
+- `GET /init` -> retry camera init without rebooting (the sketch never
+  restarts on camera failure: WiFi and the diagnostics endpoints stay
+  up so you can iterate over HTTP alone).
+
+WiFi comes up before the camera is initialized: unless the AP itself
+is down, `/debug` answers even with the camera fully failed. Camera
+buffer: uses PSRAM (VGA) when `psramFound()`, PSRAM-less modules fall
+back to QVGA + DRAM automatically and the decode scales the strip
+geometry (VGA-calibrated `CAL_CELL_PX`/`STRIP_COL_*` apply to either).
 
 Calibration knobs at the top of the sketch:
 
-- `CAL_CELL_PX`: expected width of one data cell in pixels at your
-  camera-to-circle distance. The marker-width guard is
-  11..13 x `CAL_CELL_PX`; set this from `/raw` experiments or a photo.
-- `BAND_ROW_START` / `BAND_ROW_END`: rows averaged into the profile;
-  pick rows that cross the band and avoid the circle's graduation ticks
-  for now (fine-reading work will use them deliberately).
-- Exposure/gain are fixed in `setup()`: with the studio lights the
-  levels must sit far apart (dark well under ~100, white well over
-  ~180); adjust `s->set_exposure()` until `+/-40` of noise still decodes.
+- `CAL_CELL_PX`: expected radial length of one data cell in pixels at
+  640 columns (scaled by the actual frame width). Default 13 -- at
+  the geometry.svg FOV (25.7 mm radial over the frame width) that is
+  the expected value: ~16 px/cell at SVGA, ~13 at 640 columns. The
+  marker-length guard is 11..13 x `CAL_CELL_PX`; measure the marker's
+  length along X on a `/jpg` or `/bmp` and divide by 12. All 27 cells
+  must fit in the strip region, so the ceiling is ~21 px at VGA,
+  ~27 px at SVGA.
+- `STRIP_COL_START` / `STRIP_COL_END`: the columns the strips' radial
+  extent covers (40..460 at 640 columns). Aim so the code band fills
+  this region; the decoder's coverage scan runs over these columns
+  only, so the graduated marks (in their own band to the right) never
+  enter the scan. `/debug`'s level stats cover the same columns (all
+  rows) -- use them for the exposure check (dark cells well under
+  ~100, white well over ~180).
+- `CIRCLE_STRIP_FLIP`: set to 1 if the data cells read opposite to
+  the painted order along X (window 0 = MSB = the data cell nearest
+  the marker, i.e. the strip's left/inner end, by default; check by
+  stepping one code with `/raw` and seeing whether the value
+  increments or wraps backwards).
+- Camera orientation: X (the 800 px dimension at SVGA) is radial --
+  perpendicular to the graduated lines, spanning the code band and the
+  tic band; Y is tangential -- the direction the circle moves as the
+  telescope slews. The fixed pointer line must sit at mid-height, and
+  the decoder reports the strip nearest to it (`/pos` returns 503 when
+  no strip is in view; the crossed strip under the pointer is the
+  realistic reading case).
+- Exposure/gain are fixed in `setup()`: AEC/AGC off, manual exposure
+  via `s->set_aec_value(s, 300)` (OV2640 range 0..1200). With the
+  studio lights the levels must sit far apart (dark well under ~100,
+  white well over ~180); raise/lower the value until +/-40 of noise
+  still decodes.
 
 The sketch intentionally serves fresh captures on request (no streaming).
-Averages over the band rows give roughly log2(rows) bits of noise
-immunity per pixel.
+Averaging over the strip's columns gives roughly log2(cols) bits of
+noise immunity per pixel.
 
 ## Host console
 
@@ -249,11 +379,102 @@ then connect from SkyChart/Stellarium/KStars (INDI driver
 Nothing moves at any point; the driver is strictly a coordinate reader
 plus the audio push-to guide.
 
+## Test band image generator
+
+`devtools/make_test_image.py` renders a synthetic field of view in the
+style of the reference images, with the final geometry: the mobile
+part moves vertically (tangential = Y, radial = X), the code strips
+are horizontal bands (27 cells along X: 2-cell lead-in, 12-cell
+marker, 1-cell gap, 9 Gray cells, 3-cell tail) stacked one per 5-min
+line in a LEFT radial band, the graduated marks (long 5-min at each
+strip's height, short 1-min at the fifths, anchored at the rim) sit in
+a separate band to their RIGHT, and the fixed pointer is a single thin
+horizontal line at mid-height, starting at the rim (the marks'
+anchored right ends) and extending rightward to the FOV edge -- it
+never crosses the code band -- the fine reading is the pointer
+height interpolated between graduated lines. Use it as a print/screen
+reference for laying out the real circle bands, or as a decode test
+target:
+
+```
+python3 devtools/make_test_image.py --codes 25 150          # HA codes
+python3 devtools/make_test_image.py --codes 90 --axis dec
+python3 devtools/make_test_image.py --codes 0 287 --noise 60  # robustness
+```
+
+Output is an 8-bit grayscale BMP (same format as `GET /bmp`). Every
+image is self-checked before it is written: a Python mirror of the
+intended decode pipeline for this layout (locate the strip's row
+window by dark coverage per row over the code-band columns with a
+run-height filter that rejects the thin marks and the pointer, strip
+chosen nearest mid-height -> radial profile along X -> Otsu -> widest
+dark run -> 11..13-cell guard -> 9 windows -> Gray) must recover the
+requested codes, including the two-strips-in-view case (the full-frame
+decode returns the strip nearest mid-height, where the pointer is
+drawn; with that strip cropped away the decoder must lock onto the
+other one). Validated: all 288 HA + 360 DEC codes decode at +/-40
+luma noise, plus 120 random two-strip frames (cell sizes 18..24,
+noise 0/20/40, both decodes per frame = 240/240 checks).
+`example_test_band.bmp` is a pre-generated example (codes 25 and
+150; the full-frame decode returns 25, the strip under the pointer,
+and 150 after that strip is cropped away).
+
+## Printable code strips
+
+`devtools/make_code_strips_svg.py` generates the code-band artwork as
+A4 sheets, modelled on the i25 strip sheet: the codes are printed on
+~20 long strips to glue around the circle instead of 288 individual
+blocks. Two variants are committed:
+
+- `devtools/ha_code_strips_0.5265mm.svg` - the geometry.svg cell
+  (0.5265 mm; 27 cells = 14.21 mm), for the camera parallel to the
+  graduations.
+- `devtools/ha_code_strips_0.4000mm.svg` - the compact cell (0.40 mm;
+  27 cells = 10.80 mm), for the rotated camera (Xcam perpendicular to
+  the graduations), which allows a closer camera (~15-20 mm) and more
+  pixels per 5-min pitch.
+
+Both hold 20 strips (10 columns x 2 page rows) covering all 288 HA
+codes (8 strips of 15 codes, 12 of 14). Regenerate or retune:
+
+```
+python3 devtools/make_code_strips_svg.py                     # std cell
+python3 devtools/make_code_strips_svg.py --cell-mm 0.40      # compact
+python3 devtools/make_code_strips_svg.py --axis dec --strips 30
+```
+
+Strip anatomy (radial direction): [1.5 mm inner margin][2-cell
+lead-in + 12-cell marker + 1-cell gap + 9 Gray cells + 3-cell tail][0.5
+mm outer margin]. The marker end is the INNER end (toward the circle
+centre); an IN arrow on the label tab points to it. Lengthwise a strip
+is exactly n x 7.4 mm with row centres at (k + 1/2) x 7.4 mm, so
+butt-joined strips keep the exact standard pitch across the joints.
+
+Printing and gluing:
+
+1. Print at 100 % scale (no fit-to-page) and verify the 74 mm check
+   bar on each sheet (10 code pitches) with a ruler.
+2. Cut the strips apart along the printed cut lines, and cut off the
+   6 mm label tabs (strip number + code range) before gluing.
+3. Butt-join the strips end to end around the circle, marker end
+   (IN arrow) toward the centre. The 0.5 mm outer margin must stay
+   clear of the existing graduation marks; the 0.7 mm centre ticks in
+   the margins align each code row with its 5-min graduation line.
+4. When a strip is too long for one piece, cut it mid-pattern between
+   two code rows only - the row-centre pitch survives any joint.
+
+Every generated sheet is self-checked: the dark-cell runs are compared
+against the reference 27-cell pattern for all codes, all intra-strip
+pitches are verified to exactly 7.4 mm, and a full raster decode (the
+`make_test_image.py` pipeline at 19 px/cell) recovers every one of the
+288 rows with zero failures.
+
 ## Next steps
 
 - Fine reading: overlay detection of the original long/short
   graduation marks inside the code cell currently under the crosshair,
   weighted centroid -> sub-cell interpolation (5 min -> arcseconds-ish).
-- Band artwork generator (SVG/PDF at ring radius, one marker + 9 cells
-  per block, 288/360 blocks) is a natural companion script.
+- Band artwork generator for the code band: done
+  (`make_code_strips_svg.py`, see "Printable code strips"); the
+  graduation-mark band is the existing instrument artwork.
 - Optional: ESP32-CAM soft-AP fallback and NTP on the host side.
