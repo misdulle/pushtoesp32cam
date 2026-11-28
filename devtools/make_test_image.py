@@ -56,17 +56,38 @@ GROUP_CELLS = LEAD_CELLS + MARKER_CELLS + GAP_CELLS + N_BITS + TAIL_CELLS
 
 # Geometry: tangential direction = vertical (rows), radial = columns.
 # LEFT radial band = code strips, RIGHT radial band = graduated marks.
+#
+# Real-instrument dimensions (geometry.svg, standard scale: the 5-min
+# spacing = 7.4 mm; the sketch is roughly to scale). All constants are
+# derived from it, in cell pitches (CELL_MM):
+#
+#   5-min spacing (sector)         7.400 mm = 14.056 cells
+#   1-min spacing                  1.480 mm =  2.811 cells (sector/5)
+#   code strip (27 cells)         14.215 mm radial = 0.526467 mm/cell
+#   code strip tangential height   2.046 mm =  3.887 cells (0.2766 sector)
+#   inner margin (code-zone edge -> pattern) 1.429 mm = 2.715 cells
+#   gap pattern end -> graduation zone       0.601 mm = 1.141 cells
+#   graduation zone (radial)       4.929 mm =  9.362 cells
+#   5-min mark: 98.4% of the graduation zone (spans it)
+#   1-min mark: 58.7% of the 5-min mark, anchored at the rim
+#   pointer zone beyond rim        4.555 mm =  8.652 cells
+#
+# Porting to DEC: change SECTOR_MM (the DEC circle's 0.5 deg code
+# spacing, in mm) and the code count; CELL_MM can be re-chosen the same
+# way -- the decoder only needs the 27-cell pattern and CAL_CELL_PX.
+CELL_MM = 0.526467
+SECTOR_MM = 7.4
+STRIP_HEIGHT_MM = 2.046
+INNER_MARGIN_MM = 1.429
+GAP_TO_TICS_MM = 0.601
+POINTER_ZONE_MM = 4.555
+TIC_ZONE_MM = 4.929
 TOP_MARGIN = 40
 BOTTOM_MARGIN = 40
-LEFT_MARGIN_CELLS = 2
-GAP_TO_TICS_CELLS = 2
-RIGHT_MARGIN_CELLS = 2
-TIC_BAND_CELLS = 12       # radial width of the graduated-marks band
-SECTOR_CELLS = 8          # tangential sector pitch (1 code = 5 min)
 MARK_WIDTH = 3
 POINTER_WIDTH = 3
-MARK_FRAC_SHORT = 0.4     # 1-min marks: 40% of the tic band
-MARK_FRAC_LONG = 0.7      # 5-min marks (these carry the codes)
+MARK_FRAC_SHORT = 2.844 / 4.929   # 1-min marks: 58% of the tic zone
+MARK_FRAC_LONG = 4.848 / 4.929    # 5-min marks: span the tic zone
 
 
 def gray_from_code(n):
@@ -89,12 +110,14 @@ def render(codes, cell, cal_cell_px, noise=0, seed=1):
     strip_rows[k] = (y0, y1) of code k's strip; band_cols = (x0, x1) of
     the code band (the strips' radial extent).
     """
-    left = LEFT_MARGIN_CELLS * cell
-    band_x0 = left
-    band_x1 = left + GROUP_CELLS * cell
-    tics_x1 = band_x1 + GAP_TO_TICS_CELLS * cell + TIC_BAND_CELLS * cell
-    w = tics_x1 + RIGHT_MARGIN_CELLS * cell
-    sector = SECTOR_CELLS * cell
+    inner = round(INNER_MARGIN_MM / CELL_MM * cell)
+    band_x0 = inner
+    strip_h = max(1, round(STRIP_HEIGHT_MM / CELL_MM * cell))
+    band_x1 = band_x0 + GROUP_CELLS * cell
+    tics_x1 = band_x1 + round(GAP_TO_TICS_MM / CELL_MM * cell) \
+        + round(TIC_ZONE_MM / CELL_MM * cell)
+    w = tics_x1 + round(POINTER_ZONE_MM / CELL_MM * cell)
+    sector = round(SECTOR_MM / CELL_MM * cell)
     h = TOP_MARGIN + len(codes) * sector + BOTTOM_MARGIN
 
     pix = [[255] * w for _ in range(h)]
@@ -106,11 +129,11 @@ def render(codes, cell, cal_cell_px, noise=0, seed=1):
                 row[xx] = 0
 
     strip_rows = []
-    band_w = TIC_BAND_CELLS * cell
+    band_w = tics_x1 - (band_x1 + round(GAP_TO_TICS_MM / CELL_MM * cell))
     for k, n in enumerate(codes):
         yc = TOP_MARGIN + k * sector + sector // 2   # strip center = long mark
-        y0 = yc - cell // 2
-        y1 = y0 + cell
+        y0 = yc - strip_h // 2
+        y1 = y0 + strip_h
         strip_rows.append((y0, y1))
 
         # Code strip: GROUP_CELLS cells side by side along the radius.
@@ -120,7 +143,8 @@ def render(codes, cell, cal_cell_px, noise=0, seed=1):
         pattern += [0] * TAIL_CELLS
         for i, dark in enumerate(pattern):
             if dark:
-                hline(y0, band_x0 + i * cell, band_x0 + (i + 1) * cell, cell)
+                hline(y0, band_x0 + i * cell, band_x0 + (i + 1) * cell,
+                      strip_h)
 
         # Long (5-min) mark at the strip's height, short (1-min) marks
         # at the fifths below it (until the next strip's mark).
@@ -312,10 +336,12 @@ def main():
         args.codes, args.cell, args.cal_cell_px, args.noise, args.seed)
 
     # The fixed pointer sits at mid-height; the decoder reads the strip
-    # nearest to it. Compute which rendered strip that is.
-    centers = [(y0 + y1) / 2.0 for (y0, y1) in strip_rows]
+    # nearest to it. Mirror the decoder's integer math exactly (run
+    # centers (y0+y1)//2 vs h//2, first run wins ties) so this oracle
+    # can never disagree with the decoder on a near-tie.
     mid = h // 2
-    near = min(range(len(centers)), key=lambda k: abs(centers[k] - mid))
+    near = min(range(len(strip_rows)),
+               key=lambda k: (abs((strip_rows[k][0] + strip_rows[k][1]) // 2 - mid), k))
 
     # Self-check 1: full frame decodes to the strip nearest mid-height.
     got = decode(pix, w, h, band_cols, args.cal_cell_px)
@@ -326,7 +352,8 @@ def main():
     got2 = None
     if len(args.codes) > 1:
         other = 1 - near if len(args.codes) == 2 else (0 if near else 1)
-        if centers[near] > centers[other]:
+        if (strip_rows[near][0] + strip_rows[near][1]) // 2 > \
+                (strip_rows[other][0] + strip_rows[other][1]) // 2:
             cut = strip_rows[near][0]       # nearest strip at the bottom
             sub = pix[:cut]
             h2 = cut

@@ -22,6 +22,12 @@ short marks providing sub-cell interpolation.
 
 ## Field-of-view layout (both axes)
 
+Standard scale reference (geometry.svg): the spacing between 5-min
+graduations is **7.4 mm** on the HA circle; one code cell is then
+0.5265 mm (27 cells = 14.2 mm). Porting to DEC changes only the scale
+reference (the DEC circle's 0.5 deg code spacing in mm) and the code
+count (360 instead of 288); the 9-bit code serves both.
+
 As on the real instrument: the mobile part (the graduated circle)
 moves VERTICALLY through the camera FOV -- the tangential direction is
 the camera's Y axis, the radial direction is X. The graduated marks
@@ -32,8 +38,22 @@ out ALONG THE RADIUS (left to right in the frame). Each code strip is
 [2-cell white lead-in][marker: 12 dark cells][white gap: 1 cell][9 data cells][3-cell white tail]
 ```
 
-27 cells wide (along X), one cell tall (along Y). The FOV has two
-radial bands side by side, plus the fixed pointer:
+27 cells wide (along X = 14.2 mm), 2.0 mm tall (along Y, centered on
+its 5-min mark; one strip per 7.4 mm). The FOV has two radial bands
+side by side, plus the fixed pointer (all from geometry.svg):
+
+| element | radial (X) size | notes |
+|---|---|---|
+| code strip (27 cells) | 14.215 mm | 0.5265 mm/cell, centered on its 5-min mark |
+| code zone | 16.13 mm | strip inset 1.43 mm from its inner edge |
+| gap | 0.60 mm | pattern end to graduation zone |
+| graduation zone | 4.93 mm | 5-min marks span it (4.85 mm), 1-min marks 58% (2.84 mm) |
+| pointer zone (static) | 4.56 mm | pointer starts at the rim |
+| **FOV radial total** | **25.7 mm** | mobile 21.2 + pointer 4.6 |
+
+Tangentially the FOV covers ~2.4 sectors (18 mm at the sketch scale).
+The 1-min marks sit at the fifths between consecutive 5-min marks
+(exactly 1.48 mm apart).
 
 - LEFT radial band: the code strips. They stack vertically, one per
   5-min graduation, each ALIGNED with its long (5-min) mark: same
@@ -104,7 +124,11 @@ arduino-cli compile --fqbn esp32:esp32:esp32cam \
    the code strips as horizontal bands in the LEFT of the frame, the
    graduated marks to their RIGHT, and the fixed pointer line at
    mid-height. The mobile circle part then moves VERTICALLY through
-   the FOV as the telescope slews.
+   the FOV as the telescope slews. For the geometry.svg FOV (25.7 mm
+   radial x 18 mm tangential) the lens sits ~25-33 mm from the circle
+   with the stock ~3.5 mm lens (OV3660 active area 2.867 x 2.150 mm;
+   SVGA windows the full array). Measure the true px/mm empirically:
+   put a ruler in the scene, grab `/jpg`, read mm per pixel.
 
 Watching the serial console:
 
@@ -154,10 +178,13 @@ geometry (VGA-calibrated `CAL_CELL_PX`/`STRIP_COL_*` apply to either).
 Calibration knobs at the top of the sketch:
 
 - `CAL_CELL_PX`: expected radial length of one data cell in pixels at
-  640 columns (scaled by the actual frame width). The marker-length
-  guard is 11..13 x `CAL_CELL_PX`; measure the marker's length along X
-  on a `/jpg` or `/bmp` and divide by 12. All 27 cells must fit in the
-  strip region, so the ceiling is ~21 px at VGA, ~27 px at SVGA.
+  640 columns (scaled by the actual frame width). Default 13 -- at
+  the geometry.svg FOV (25.7 mm radial over the frame width) that is
+  the expected value: ~16 px/cell at SVGA, ~13 at 640 columns. The
+  marker-length guard is 11..13 x `CAL_CELL_PX`; measure the marker's
+  length along X on a `/jpg` or `/bmp` and divide by 12. All 27 cells
+  must fit in the strip region, so the ceiling is ~21 px at VGA,
+  ~27 px at SVGA.
 - `STRIP_COL_START` / `STRIP_COL_END`: the columns the strips' radial
   extent covers (40..460 at 640 columns). Aim so the code band fills
   this region; the decoder's coverage scan runs over these columns

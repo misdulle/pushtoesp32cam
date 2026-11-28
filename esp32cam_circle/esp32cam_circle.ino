@@ -87,21 +87,25 @@
 #define GAP_CELLS 1
 /*
   Geometry for radial code strips (parallel to the graduated bars),
-  as on the real instrument: the mobile part moves VERTICALLY through
-  the FOV (the tangential direction is the camera's Y axis), the
-  radial direction is X. A code strip is 27 cells laid out along X
-  ([2 lead][12 marker][1 gap][9 Gray, MSB at the strip's left/inner
-  end][3 tail]), one cell tall in Y. The strips live in a radial band
-  on the LEFT of the FOV; the graduated marks (1-min short, 5-min
-  long, anchored at the rim) sit in a separate band to their RIGHT,
-  each long mark at its strip's height. The fixed pointer line runs
-  parallel to the marks (horizontal) at a fixed height near mid-FOV,
-  from the rim (the marks' anchored right ends) to the FOV's right
-  edge -- it never crosses the code band; the decoder reads the strip
-  closest to that height.
+  as on the real instrument (geometry.svg, standard scale: 5-min
+  spacing = 7.4 mm, one cell = 0.5265 mm): the mobile part moves
+  VERTICALLY through the FOV (the tangential direction is the camera's
+  Y axis), the radial direction is X. A code strip is 27 cells laid
+  out along X ([2 lead][12 marker][1 gap][9 Gray, MSB at the strip's
+  left/inner end][3 tail]) = 14.2 mm, 2.0 mm tall tangentially
+  (~3.9 cells), centered on its 5-min mark (one strip per 7.4 mm).
+  The strips live in a radial band on the LEFT of the FOV; the
+  graduated marks (1-min = 2.84 mm long, 5-min = 4.85 mm, anchored at
+  the rim) sit in a separate band to their RIGHT (4.93 mm deep). The
+  fixed pointer line runs parallel to the marks (horizontal) at a
+  fixed height near mid-FOV, from the rim (the marks' anchored right
+  ends) 4.56 mm to the right -- it never crosses the code band; the
+  decoder reads the strip closest to that height.
 
   CAL_CELL_PX     radial cell pitch in px at 640 columns (VGA-
-                  calibrated; scaled by width/640). Max ~21 at VGA,
+                  calibrated; scaled by width/640). Default 13 = the
+                  sketch-scale FOV (25.7 mm radial over 800 px at
+                  SVGA -> 16 px/cell -> 12.8 at 640). Max ~21 at VGA,
                   ~27 at SVGA (27 cells must fit the strip region).
   STRIP_COL_*     columns covered by the strips' radial extent
                   (scaled the same way). The coverage scan runs over
@@ -114,7 +118,7 @@
                   painted order (window 0 = MSB = the data cell
                   nearest the marker by default).
 */
-#define CAL_CELL_PX 15
+#define CAL_CELL_PX 13
 #define STRIP_COL_START 40
 #define STRIP_COL_END 460
 #ifndef CIRCLE_STRIP_FLIP
